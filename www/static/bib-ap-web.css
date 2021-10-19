@@ -1,0 +1,81 @@
+/* body: */
+
+body {
+  background-color: #ffffff;
+  margin: 0;
+  padding: 0;
+  font-family: sans-serif, Arial, Helvetica;
+  font-size: 1.1em;
+  color: #2f4f4f;
+}
+
+/* page header: */
+
+.page_header {
+  width: 100%;
+  margin-bottom: 1.2em;
+  background-color: #99ccff;
+  padding-left: 0.4em;
+  padding-top: 1.2em;
+  padding-bottom: 1.2em;
+  color: #708090;
+}
+
+.header_title {
+  font-size: 0.8em;
+}
+
+.header_text {
+  font-size: 1.5em;
+}
+
+/* page text: */
+
+.page_text {
+  padding-left: 0.4em;
+}
+
+.page_text_form {
+  margin-top: 1em;
+  margin-bottom: 1em;
+}
+
+.form_row {
+  margin-bottom: 0.2em;
+}
+
+.form_label {
+  width: 8em;
+  float: left;
+  clear: left;
+  text-align: left;
+  margin-right: 0.2em;
+  margin-bottom: 0.2em;
+  padding-top: 0.3em;
+}
+
+.form_input {
+  width: 13em;
+  font-size: 0.9em;
+  color: #2f4f4f;
+  padding-left: 0.1em;
+}
+
+input[type=submit] {
+  font-size: 0.9em;
+  color: #ffffff;
+  background-color: #2488cb;
+  border: 1px solid #2488cb;
+  border-radius: 5px;
+  padding: 0.3em;
+  margin-top: 1em;
+  margin-bottom: 1em;
+  cursor: pointer;
+}
+
+/* remove outlines from active buttons: */
+button, button:focus, button:active {
+  outline: 0;
+}
+:focus {outline:none;}
+::-moz-focus-inner {border:0;}

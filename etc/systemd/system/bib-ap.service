@@ -1,0 +1,12 @@
+[Unit]
+Description=BiB WiFi configuration Access Point service
+After=multi-user.target
+
+[Service]
+Type=oneshot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/bibsensor/bin/bib-ap /etc/bibsensor/bibsensor.conf
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

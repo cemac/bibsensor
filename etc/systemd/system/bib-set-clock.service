@@ -1,0 +1,15 @@
+[Unit]
+Description=Restore / save the current clock
+DefaultDependencies=no
+After=local-fs.target systemd-tmpfiles-setup.service
+Before=chrony.service
+Conflicts=shutdown.target
+
+[Service]
+ExecStart=/opt/bibsensor/bin/bib-set-clock load
+ExecStop=/opt/bibsensor/bin/bib-set-clock save
+Type=oneshot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

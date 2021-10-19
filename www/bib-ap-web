@@ -1,0 +1,167 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+
+"""
+Simple web app to allow wifi configuration.
+
+The program expects one argument - the location of the config file:
+
+  bib-ap-web /etc/bibsensor/bibsensor.conf
+"""
+
+# Standard library imports:
+import binascii
+try:
+    import configparser as ConfigParser
+except ImportError:
+    import ConfigParser
+import hashlib
+import socket
+import subprocess
+import sys
+# Third party imports
+from flask import Flask, render_template, request
+
+# Config file section for this program:
+CONFIG_SECTION = 'bib-ap'
+# Default configuration values:
+AP_IP = '10.3.141.1'
+AP_STATUS_FILE = '/root/.bib-ap'
+
+# Define the Flask application:
+APP = Flask(__name__)
+
+def check_args(sys_args):
+    """
+    Check the program arguments, and return path to config file, if valid
+    """
+    # Check number of arguments, if none, return:
+    if len(sys_args) < 2:
+        return
+    # Config file path is first argument. Try to open it and if succeeds,
+    # return the patht to the config file, else return None:
+    try:
+        with open(sys.argv[1], 'r') as config_fh:
+            config_file = sys.argv[1]
+    except:
+        config_file = None
+    # Return the path to the config file:
+    return config_file
+
+def get_config(config_file, config_section):
+    """
+    Get the configuration, from config file if available
+    """
+    # Init config object:
+    config = {
+        'ap_ip': AP_IP,
+        'ap_status_file': AP_STATUS_FILE
+    }
+    # If no config file, use default values:
+    if not config_file:
+        return config
+    # Create ConfigParser:
+    config_parser = ConfigParser.RawConfigParser()
+    # Try to read config file:
+    try:
+        config_parser.read_file(open(config_file, 'r'))
+    except AttributeError:
+        config_parser.readfp(open(config_file, 'r'))
+    # Get values from config file, use defaults if not available ...
+    # IP address to use as AP:
+    try:
+        config['ap_ip'] = config_parser.get(config_section, 'AP_IP')
+    except:
+        pass
+    # File fore storing wireless configuration status:
+    try:
+        config['ap_status_file'] = config_parser.get(config_section,
+                                                     'AP_STATUS_FILE')
+    except:
+        pass
+    # Return the config:
+    return config
+
+def set_status(config, status=0):
+    """
+    Write AP configuration status to the status file
+    """
+    # Get the status file form the config:
+    status_file = config['ap_status_file']
+    # Write the status to the file:
+    with open(status_file, 'w') as status_fh:
+        status_fh.write('{0}\n'.format(status))
+
+def update_config(new_hostname, ssid, passphrase,
+               wpa_conf='/etc/wpa_supplicant/wpa_supplicant.conf'):
+    """
+    Set hostname and add config to wpa_supplicant config file
+    """
+    # Get current hostname:
+    old_hostname = socket.gethostname()
+    # For each host file:
+    for hosts_file in ['/etc/hosts', '/etc/hostname']:
+        # Check file. Read in lines:
+        with open(hosts_file, 'r') as hosts_fh:
+            hosts_lines = hosts_fh.readlines()
+        # List for storing updated lines:
+        new_hosts_lines = []
+        # Loop through hosts lines:
+        for hosts_line in hosts_lines:
+            # Replace default hostname:
+            new_hosts_line = hosts_line.replace(
+                '{0}\n'.format(old_hostname),
+                '{0}\n'.format(new_hostname)
+            )
+            # Append to new_hosts_lines list:
+            new_hosts_lines.append(new_hosts_line)
+        # If hosts lines have changed:
+        if hosts_lines != new_hosts_lines:
+            # Update hosts file:
+            with open(hosts_file, 'w') as hosts_fh:
+                hosts_fh.writelines(new_hosts_lines)
+    # Hash the passphrase:
+    psk = hashlib.pbkdf2_hmac(
+        'sha1', str.encode(passphrase), str.encode(ssid), 4096, 32
+    )
+    psk = binascii.hexlify(psk).decode('utf-8')
+    # Open config file for writing:
+    with open(wpa_conf, 'a') as wpa_fh:
+        # Write network config:
+        wpa_fh.write('\nnetwork={\n')
+        wpa_fh.write('  ssid="{0}"\n'.format(ssid))
+        wpa_fh.write('  scan_ssid=1\n')
+        wpa_fh.write('  psk={0}\n'.format(psk))
+        wpa_fh.write('  key_mgmt=WPA-PSK\n')
+        wpa_fh.write('}\n')
+
+# Route for root page:
+@APP.route('/', methods=['POST', 'GET'])
+def home():
+    # If GET, display configuraiton form:
+    if request.method == 'GET':
+        return render_template('bib-ap-web.html', hostname=socket.gethostname())
+    # If POST, configure wifi and reboot:
+    if request.method == 'POST':
+        hostname = request.form['hostname']
+        ssid = request.form['ssid']
+        passphrase = request.form['passphrase']
+        update_config(hostname, ssid, passphrase)
+        set_status(config, 1)
+        cmd_status = subprocess.call(['reboot'])
+
+if __name__ == '__main__':
+    # Check arguments:
+    config_file = check_args(sys.argv)
+    # Display a message:
+    if config_file:
+        err_msg = 'Using config file: {0}\n'.format(config_file)
+    else:
+        err_msg = 'Config file not found. Using default values\n'
+    sys.stdout.write(err_msg)
+    # Get the configuration values:
+    config = get_config(config_file, CONFIG_SECTION)
+    # Add config to Flask application:
+    APP.config['config'] = config
+    # Run Flask application:
+    APP.run(host=config['ap_ip'], port=80, debug=False)

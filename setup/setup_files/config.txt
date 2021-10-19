@@ -1,0 +1,11 @@
+dtparam=spi=on
+dtparam=audio=on
+[pi4]
+max_framebuffers=2
+[all]
+dtoverlay=disable-bt
+enable_uart=1
+hdmi_force_hotplug=1
+dtparam=i2c_arm=on
+dtoverlay=i2c-rtc,ds1307
+dtoverlay=gpio-shutdown,gpio_pin=21

@@ -1,0 +1,682 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+Read and log air quality sensor data
+"""
+
+# Standard library imports:
+try:
+    import configparser as ConfigParser
+except ImportError:
+    import ConfigParser
+import datetime
+from functools import partial
+import logging
+import os
+import signal
+import socket
+import subprocess
+import sys
+from threading import Event, Lock, Thread
+import time
+
+# Third party imports:
+import Adafruit_DHT
+import RPi.GPIO as GPIO
+import gpsd
+import opc
+import sensirion_sps030
+import spidev
+
+# Config file section for this program:
+CONFIG_SECTION = 'bib-sensor'
+# Default configuration values:
+POLL_INTERVAL = 10
+LOG_INTERVAL = 60
+DATA_DIR = '/data/bib-sensor'
+R1_DECIMALS = 3
+NODATA_VALUE = -999
+SENSOR_TIMEOUT = 1500
+DHT_GPIO_POWER = 17
+DHT_GPIO_OUT = 4
+DHT_DECIMALS = 1
+
+def check_args(sys_args):
+    """
+    Check the program arguments, and return path to config file, if valid
+    """
+    # Check number of arguments, if none, return:
+    if len(sys_args) < 2:
+        return
+    # Config file path is first argument. Try to open it and if succeeds,
+    # return the patht to the config file, else return None:
+    try:
+        with open(sys.argv[1], 'r') as config_fh:
+            config_file = sys.argv[1]
+    except:
+        config_file = None
+    # Return the path to the config file:
+    return config_file
+
+def get_config(config_file, config_section):
+    """
+    Get the configuration, from config file if available
+    """
+    # Init config object:
+    config = {
+        'poll_interval': POLL_INTERVAL,
+        'log_interval': LOG_INTERVAL,
+        'data_dir': DATA_DIR,
+        'r1_decimals': R1_DECIMALS,
+        'nodata_value': NODATA_VALUE,
+        'sensor_timeout': SENSOR_TIMEOUT,
+        'dht_gpio_power': DHT_GPIO_POWER,
+        'dht_gpio_out': DHT_GPIO_OUT
+    }
+    # If no config file, use default values:
+    if not config_file:
+        return config
+    # Create ConfigParser:
+    config_parser = ConfigParser.RawConfigParser()
+    # Try to read config file:
+    try:
+        config_parser.read_file(open(config_file, 'r'))
+    except AttributeError:
+        config_parser.readfp(open(config_file, 'r'))
+    # Get values from config file, use defaults if not available ...
+    # Poll interval in seconds:
+    try:
+        config['poll_interval'] = config_parser.getfloat(
+            config_section, 'POLL_INTERVAL'
+        )
+    except:
+        pass
+    # Log interval in seconds:
+    try:
+        config['log_interval'] = config_parser.getfloat(
+            config_section, 'LOG_INTERVAL'
+        )
+    except:
+        pass
+    # Data / logging directory:
+    try:
+        config['data_dir'] = config_parser.get(config_section, 'DATA_DIR')
+    except:
+        pass
+    # Number of decimal places to which R1 data will be rounded:
+    try:
+        config['r1_decimals'] = config_parser.getint(
+            config_section, 'R1_DECIMALS'
+        )
+    except:
+        pass
+    # No data value as float:
+    try:
+        config['nodata_value'] = config_parser.getfloat(
+            config_section, 'NODATA_VALUE'
+        )
+    except:
+        pass
+    # If any AQ sensor has not returned a reading in this many seconds, give up
+    # and exit. The service should restart in 5 minutes:
+    try:
+        config['sensor_timeout'] = config_parser.getfloat(
+            config_section, 'SENSOR_TIMEOUT'
+        )
+    except:
+        pass
+    # GPIO pins for DHT temperature and humidity sensor:
+    try:
+        config['dht_gpio_power'] = config_parser.getint(
+            config_section, 'DHT_GPIO_POWER'
+        )
+    except:
+        pass
+    try:
+        config['dht_gpio_out'] = config_parser.getint(
+            config_section, 'DHT_GPIO_OUT'
+        )
+    except:
+        pass
+    # Number of decimal places to which DHT data will be rounded:
+    try:
+        config['dht_decimals'] = config_parser.getint(
+            config_section, 'DHT_DECIMALS'
+        )
+    except:
+        pass
+    # Return the config:
+    return config
+
+def init_r1():
+    """
+    Try to init Alphasense R1 sensor and return details
+    """
+    # Init SPI bits:
+    spi = spidev.SpiDev()
+    spi.open(0, 0)
+    spi.mode = 1
+    spi.max_speed_hz = 500000
+    # Try to init sensor:
+    try:
+        # Switch the sensor on, and take first readings, which are usually
+        # useless:
+        r1 = opc.OPCR1(spi)
+        r1.on()
+        time.sleep(2)
+        # First reading might be garbage:
+        try:
+            r1.histogram()
+        except:
+            pass
+        time.sleep(2)
+        r1.histogram()
+    except Exception as ex_msg:
+        sys.stdout.write('R1 init error: {0}\n'.format(ex_msg))
+        r1 = None
+    # Return the sensor object:
+    return r1
+
+def init_sps():
+    """
+    Try to init Sensirion SPS030 sensor and return details
+    """
+    # Try to init sensor:
+    try:
+        sps = sensirion_sps030.Sensirion(
+           port='/dev/serial0', log_level=logging.ERROR
+        )
+        # Start with a fan clean, takes just over 10 seconds, but waiting
+        # for 20 seconds seems to be safer:
+        sps.start_fan_clean()
+        time.sleep(20)
+        sps.read()
+        time.sleep(2)
+    except Exception as ex_msg:
+        sys.stdout.write('SPS init error: {0}\n'.format(ex_msg))
+        sps = None
+    # Return the sensor object:
+    return sps
+
+def get_sensors():
+    """
+    Check which sensors are currently connected, and return details
+    """
+    # Init dict for sensor information:
+    sensors = {
+        'R1': None,
+        'SPS': None,
+    }
+    # Check for Alphasense R1 sensor:
+    sensors['R1'] = init_r1()
+    # Check for Sensirion SPS sensor:
+    sensors['SPS'] = init_sps()
+    # Return the sensor details:
+    return sensors
+
+def gpio_setup(warnings=False, mode=GPIO.BCM):
+    """
+    Set GPIO options
+    """
+    GPIO.setwarnings(warnings)
+    GPIO.setmode(mode)
+
+def get_dht(config):
+    """
+    Check for connected DHT temperature and humidity sensor
+    """
+    # Get required config values:
+    dht_gpio_power = config['dht_gpio_power']
+    dht_gpio_out = config['dht_gpio_out']
+    # Set up power pin:
+    GPIO.setup(dht_gpio_power, GPIO.IN)
+    time.sleep(0.1)
+    GPIO.setup(dht_gpio_power, GPIO.OUT)
+    time.sleep(0.1)
+    GPIO.output(dht_gpio_power, GPIO.HIGH)
+    time.sleep(0.1)
+    # Create sensor object:
+    dht = Adafruit_DHT.DHT22
+    # Check if we can read anything:
+    rh, temp = Adafruit_DHT.read_retry(
+        dht, dht_gpio_out, retries=10, delay_seconds=2
+    )
+    # If not, turn off the power:
+    if rh is None or temp is None:
+        GPIO.output(dht_gpio_power, GPIO.LOW)
+        GPIO.setup(dht_gpio_power, GPIO.IN)
+        # Set dht to None:
+        dht = None
+    # Else, display message:
+    else:
+        err_msg = 'DHT sensor found\n'
+        sys.stdout.write(err_msg)
+    # Return dht object:
+    return dht
+
+def get_gps():
+    """
+    Check for connected GPS
+    """
+    # Try to connect with gpsd:
+    try:
+        gps = gpsd
+        gps.connect()
+        gps_devices = gps.state['devices']['devices']
+        assert len(gps_devices) != 0
+        err_msg = 'GPS found\n'
+        sys.stdout.write(err_msg)
+    except:
+        gps = None
+    # Return the GPS:
+    return gps
+
+def get_system_info(sensors):
+    """
+    Get some system information
+    """
+    # Init dict:
+    sysinfo = {
+      'pi_model': None,
+      'pi_serial': None,
+      'ip_addresses': None,
+      'r1_serial': None,
+      'sps_serial': None
+    }
+    # Get pi model and serial:
+    cpuinfo = subprocess.Popen(
+        ['/usr/bin/cat', '/proc/cpuinfo'], stdout=subprocess.PIPE
+    )
+    for line in cpuinfo.stdout:
+        values = line.decode('utf-8').split(':')
+        if values[0].strip().replace('\t', '') == 'Model':
+            sysinfo['pi_model'] = values[1].strip()
+        if values[0].strip().replace('\t', '') == 'Serial':
+            sysinfo['pi_serial'] = values[1].strip()
+    # Get system ip addresses:
+    ipinfo = subprocess.Popen(
+        ['/usr/bin/hostname', '-I'], stdout=subprocess.PIPE
+    )
+    sysinfo['ip_addresses'] = (
+        ipinfo.stdout.read().decode('utf-8').rstrip('\n').strip()
+    )
+    # Get r1 serial:
+    if sensors['R1'] is not None:
+        sysinfo['r1_serial'] = sensors['R1'].sn().strip()
+    # Get sps serial:
+    if sensors['SPS'] is not None:
+        sysinfo['sps_serial'] = sensors['SPS'].get_serial_no()
+    # Return the information:
+    return sysinfo
+
+def poll_sensors(config, dht, gps, sensors, sensor_data):
+    """
+    Poll data from the sensors
+    """
+    # Get required config values:
+    poll_interval = config['poll_interval']
+    r1_decimals = config['r1_decimals']
+    nodata_value = config['nodata_value']
+    sensor_timeout = config['sensor_timeout']
+    dht_gpio_out = config['dht_gpio_out']
+    dht_decimals = config['dht_decimals']
+    # Variables for storing time of last good value:
+    last_r1_time = time.time()
+    last_sps_time = time.time()
+    # Do this until stopped:
+    while True:
+        # If told to exit, exit:
+        if sensor_data['exit'].wait(timeout=0):
+            err_msg = 'Polling thread exiting\n'
+            sys.stdout.write(err_msg)
+            break
+        # Get time at start of poll loop:
+        time_init = time.time()
+        # Get current date in UTC:
+        current_date = datetime.datetime.utcnow()
+        # Data for this time step:
+        ts_data = {
+            'date': current_date.strftime('%Y-%m-%d %H:%M:%S'),
+            'temp': nodata_value,
+            'rh': nodata_value,
+            'lat': nodata_value,
+            'lon': nodata_value,
+            'alt': nodata_value,
+            'r1_temp': nodata_value,
+            'r1_rh': nodata_value,
+            'r1_pm1': nodata_value,
+            'r1_pm2.5': nodata_value,
+            'r1_pm10': nodata_value,
+            'r1_period': nodata_value,
+            'r1_bin0': nodata_value,
+            'r1_bin1': nodata_value,
+            'r1_bin2': nodata_value,
+            'r1_bin3': nodata_value,
+            'r1_bin4': nodata_value,
+            'r1_bin5': nodata_value,
+            'r1_bin6': nodata_value,
+            'r1_bin7': nodata_value,
+            'r1_bin8': nodata_value,
+            'r1_bin9': nodata_value,
+            'r1_bin10': nodata_value,
+            'r1_bin11': nodata_value,
+            'r1_bin12': nodata_value,
+            'r1_bin13': nodata_value,
+            'r1_bin14': nodata_value,
+            'r1_bin15': nodata_value,
+            'r1_bin1_mtof': nodata_value,
+            'r1_bin3_mtof': nodata_value,
+            'r1_bin5_mtof': nodata_value,
+            'r1_bin7_mtof': nodata_value,
+            'r1_sfr': nodata_value,
+            'r1_reject_glitch': nodata_value,
+            'r1_reject_long': nodata_value,
+            'sps_n05': nodata_value,
+            'sps_n1': nodata_value,
+            'sps_n2.5': nodata_value,
+            'sps_n4': nodata_value,
+            'sps_n10': nodata_value,
+            'sps_pm1': nodata_value,
+            'sps_pm2.5': nodata_value,
+            'sps_pm4': nodata_value,
+            'sps_pm10': nodata_value,
+            'sps_tps': nodata_value
+        }
+        # Check for DHT:
+        if dht is not None:
+            # Try to get dht values:
+            try:
+                rh, temp = Adafruit_DHT.read_retry(
+                    dht, dht_gpio_out, retries=5, delay_seconds=0.5
+                )
+                # Check values, and log:
+                if temp is not None:
+                    ts_data['temp'] = round(temp, dht_decimals)
+                if rh is not None:
+                    ts_data['rh'] = round(rh, dht_decimals)
+            except Exception as ex_msg:
+                sys.stdout.write('DHT error: {0}\n'.format(ex_msg))
+                pass
+        # Check for GPS:
+        if gps is not None:
+            # Try to get GPS data:
+            try:
+                gps_data = gps.get_current()
+                # Check for no signal / zero values:
+                lat = gps_data.lat
+                lon = gps_data.lon
+                alt = gps_data.alt
+                # If no signal, use no data value:
+                if lat == 0 and lon == 0 and alt == 0:
+                    lat = nodata_value
+                    lon = nodata_value
+                    alt = nodata_value
+                # Store the values:
+                ts_data['lat'] = lat
+                ts_data['lon'] = lon
+                ts_data['alt'] = alt
+            except Exception as ex_msg:
+                sys.stdout.write('GPS error: {0}\n'.format(ex_msg))
+                pass
+        # Acquire lock:
+        sensor_data['lock'].acquire()
+        # Check for R1 sensor:
+        if sensors['R1'] is not None:
+            # Try to get R1 sensor data:
+            try:
+                r1_data = sensors['R1'].histogram()
+                ts_data['r1_temp'] = round(r1_data['Temperature'], r1_decimals)
+                ts_data['r1_rh'] = round(r1_data['Humidity'], r1_decimals)
+                ts_data['r1_pm1'] = round(r1_data['PM1'], r1_decimals)
+                ts_data['r1_pm2.5'] = round(r1_data['PM2.5'], r1_decimals)
+                ts_data['r1_pm10'] = round(r1_data['PM10'], r1_decimals)
+                ts_data['r1_period'] = round(r1_data['Sampling Period'],
+                                             r1_decimals)
+                ts_data['r1_bin0'] = round(r1_data['Bin 0'], r1_decimals)
+                ts_data['r1_bin1'] = round(r1_data['Bin 1'], r1_decimals)
+                ts_data['r1_bin2'] = round(r1_data['Bin 2'], r1_decimals)
+                ts_data['r1_bin3'] = round(r1_data['Bin 3'], r1_decimals)
+                ts_data['r1_bin4'] = round(r1_data['Bin 4'], r1_decimals)
+                ts_data['r1_bin5'] = round(r1_data['Bin 5'], r1_decimals)
+                ts_data['r1_bin6'] = round(r1_data['Bin 6'], r1_decimals)
+                ts_data['r1_bin7'] = round(r1_data['Bin 7'], r1_decimals)
+                ts_data['r1_bin8'] = round(r1_data['Bin 8'], r1_decimals)
+                ts_data['r1_bin9'] = round(r1_data['Bin 9'], r1_decimals)
+                ts_data['r1_bin10'] = round(r1_data['Bin 10'], r1_decimals)
+                ts_data['r1_bin11'] = round(r1_data['Bin 11'], r1_decimals)
+                ts_data['r1_bin12'] = round(r1_data['Bin 12'], r1_decimals)
+                ts_data['r1_bin13'] = round(r1_data['Bin 13'], r1_decimals)
+                ts_data['r1_bin14'] = round(r1_data['Bin 14'], r1_decimals)
+                ts_data['r1_bin15'] = round(r1_data['Bin 15'], r1_decimals)
+                ts_data['r1_bin1_mtof'] = round(r1_data['Bin1 MToF'], r1_decimals)
+                ts_data['r1_bin3_mtof'] = round(r1_data['Bin3 MToF'], r1_decimals)
+                ts_data['r1_bin5_mtof'] = round(r1_data['Bin5 MToF'], r1_decimals)
+                ts_data['r1_bin7_mtof'] = round(r1_data['Bin7 MToF'], r1_decimals)
+                ts_data['r1_sfr'] = round(r1_data['SFR'], r1_decimals)
+                ts_data['r1_reject_glitch'] = r1_data['Reject count glitch']
+                ts_data['r1_reject_long'] = r1_data['Reject count long']
+                last_r1_time = time.time()
+            except Exception as ex_msg:
+                sys.stdout.write('R1 error: {0}\n'.format(ex_msg))
+                pass
+            # If sensor hasn't successfully updated in configured timeout, exit:
+            if (time.time() - last_r1_time) > sensor_timeout:
+                err_msg = 'No R1 data logged in {0} seconds. Exiting\n'
+                err_msg = err_msg.format(sensor_timeout)
+                sys.stdout.write(err_msg)
+                sensor_data['exit_status'] = 1
+                sensor_data['exit'].set()
+        # Check for SPS sensor:
+        if sensors['SPS'] is not None:
+            # Try to get SPS sensor data:
+            try:
+                sps_data = sensors['SPS'].read()
+                ts_data['sps_n05'] = sps_data.n1
+                ts_data['sps_n1'] = sps_data.n1
+                ts_data['sps_n2.5'] = sps_data.n25
+                ts_data['sps_n4'] = sps_data.n4
+                ts_data['sps_n10'] = sps_data.n10
+                ts_data['sps_pm1'] = sps_data.pm1
+                ts_data['sps_pm2.5'] = sps_data.pm25
+                ts_data['sps_pm4'] = sps_data.pm4
+                ts_data['sps_pm10'] = sps_data.pm10
+                ts_data['sps_tps'] = sps_data.tps
+                last_sps_time = time.time()
+            except Exception as ex_msg:
+                sys.stdout.write('SPS error: {0}\n'.format(ex_msg))
+                pass
+            # If sensor hasn't successfully updated in configured timeout, exit:
+            if (time.time() - last_sps_time) > sensor_timeout:
+                err_msg = 'No SPS data logged in {0} seconds. Exiting\n'
+                err_msg = err_msg.format(sensor_timeout)
+                sys.stdout.write(err_msg)
+                sensor_data['exit_status'] = 1
+                sensor_data['exit'].set()
+        # Store the data and release lock:
+        sensor_data['data'].append(ts_data)
+        sensor_data['lock'].release()
+        # Check loop run time:
+        run_time = time.time() - time_init
+        sleep_time = poll_interval - run_time
+        # Wait for required interval:
+        if 0 < sleep_time < poll_interval:
+            sensor_data['exit'].wait(timeout=sleep_time)
+        else:
+            sensor_data['exit'].wait(timeout=poll_interval)
+
+def log_data(config, sensors, sensor_data):
+    """
+    Write sensor data to file
+    """
+    # Get required config values:
+    log_interval = config['log_interval']
+    data_dir = config['data_dir']
+    # Fields expected in sensor data:
+    data_fields = [
+        'date', 'temp', 'rh', 'lat', 'lon', 'alt', 'r1_temp', 'r1_rh',
+        'r1_pm1', 'r1_pm2.5', 'r1_pm10', 'r1_period', 'r1_bin0', 'r1_bin1',
+        'r1_bin2', 'r1_bin3', 'r1_bin4', 'r1_bin5', 'r1_bin6', 'r1_bin7',
+        'r1_bin8', 'r1_bin9', 'r1_bin10', 'r1_bin11', 'r1_bin12', 'r1_bin13',
+        'r1_bin14', 'r1_bin15', 'r1_bin1_mtof', 'r1_bin3_mtof', 'r1_bin5_mtof',
+        'r1_bin7_mtof', 'r1_sfr', 'r1_reject_glitch', 'r1_reject_long',
+        'sps_n05', 'sps_n1', 'sps_n2.5', 'sps_n4', 'sps_n10', 'sps_pm1',
+        'sps_pm2.5', 'sps_pm4', 'sps_pm10', 'sps_tps'
+    ]
+    # Do this until stopped:
+    while True:
+        # If told to exit, exit:
+        if sensor_data['exit'].wait(timeout=0):
+            err_msg = 'Logging thread exiting\n'
+            sys.stdout.write(err_msg)
+            break
+        # Get time at start of log loop:
+        time_init = time.time()
+        # Acquire the lock:
+        sensor_data['lock'].acquire()
+        # Get some system information:
+        sysinfo = get_system_info(sensors)
+        # System information output filename:
+        sysinfo_out_file = 'sysinfo.csv'
+        sysinfo_out_path = os.sep.join(
+            [data_dir, sysinfo_out_file]
+        )
+        # Open the CSV file for writing:
+        with open(sysinfo_out_path, 'w') as sysinfo_csv_file:
+            for key in sysinfo:
+                value = sysinfo[key]
+                sysinfo_csv_file.write('{0},{1}\n'.format(key, value))
+        # If there is any data:
+        if sensor_data['data']:
+            # Work out the current file name:
+            current_date = datetime.datetime.utcnow()
+            date_str = current_date.strftime('%Y-%m-%d')
+            out_file = '{0}.csv'.format(date_str)
+            out_path = os.sep.join([data_dir, out_file])
+            # Check if the file exists / has size:
+            try:
+                csv_file_size = os.path.getsize(out_path)
+            except:
+                csv_file_size = 0
+            # Open the CSV file for appending:
+            with open(out_path, 'a') as csv_file:
+                # If file size is 0, add header:
+                if not csv_file_size:
+                    # Create header:
+                    csv_hdr = ','.join(data_fields)
+                    # Write to file:
+                    csv_file.write('{0}\n'.format(csv_hdr))
+                # Loop through data entries:
+                for data_entry in sensor_data['data']:
+                    # Get and write values:
+                    values = ['{0}'.format(data_entry[i]) for i in data_entry]
+                    csv_data = ','.join(values)
+                    csv_file.write('{0}\n'.format(csv_data))
+            # Empty the sensor data, as it has now been written to file:
+            sensor_data['data'] = []
+        # Release the lock:
+        sensor_data['lock'].release()
+        # Check loop run time:
+        run_time = time.time() - time_init
+        sleep_time = log_interval - run_time
+        # Sleep for required interval:
+        if 0 < sleep_time < log_interval:
+            sensor_data['exit'].wait(timeout=sleep_time)
+        else:
+            sensor_data['exit'].wait(timeout=log_interval)
+
+def exit(config, sensors, sensor_data):
+    """
+    Turn off sensors and exit:
+    """
+    # Tell the threads to stop:
+    sensor_data['exit'].set()
+    # If r1 sensor is connected, switch it off:
+    if sensors['R1'] is not None:
+        sensors['R1'].off()
+    # If sps sensor is connected, switch it off:
+    if sensors['SPS'] is not None:
+        sensors['SPS'].reset()
+    # Turn off power to dht sensor:
+    dht_gpio_power = config['dht_gpio_power']
+    GPIO.setup(dht_gpio_power, GPIO.OUT)
+    time.sleep(0.1)
+    GPIO.output(dht_gpio_power, GPIO.LOW)
+    time.sleep(0.1)
+    GPIO.setup(dht_gpio_power, GPIO.IN)
+    # Exit:
+    err_msg = 'Exiting\n'
+    sys.stdout.write(err_msg)
+    sys.exit(sensor_data['exit_status'])
+
+def __exit(config, sensors, sensor_data, signal, frame):
+    """
+    Exit on kill signal
+    """
+    # Send sensor information to exit function:
+    exit(config, sensors, sensor_data)
+
+def main():
+    """
+    Main program function
+    """
+    # Check arguments:
+    config_file = check_args(sys.argv)
+    # Display a message:
+    if config_file:
+        err_msg = 'Using config file: {0}\n'.format(config_file)
+    else:
+        err_msg = 'Config file not found. Using default values\n'
+    sys.stdout.write(err_msg)
+    # Get the configuration values:
+    config = get_config(config_file, CONFIG_SECTION)
+    # Init data dict for use by threads:
+    sensor_data = {
+        'exit': Event(),
+        'exit_status': 0,
+        'data': [],
+        'lock': None
+    }
+    # Check which sensors are connected:
+    sensors = get_sensors()
+    # Set required GPIO options:
+    gpio_setup()
+    # Check for DHT temperature and relative humidity sensor:
+    dht = get_dht(config)
+    # Check for gps:
+    gps = get_gps()
+    # Check which sensors have connected, give up if none:
+    sensor_count = 0
+    for sensor in list(sensors.keys()):
+        if sensors[sensor] is not None:
+            sensor_count += 1
+            err_msg = '{0} sensor found\n'.format(sensor)
+            sys.stdout.write(err_msg)
+    if sensor_count == 0:
+        err_msg = 'No sensors found. Exiting\n'
+        sys.stdout.write(err_msg)
+        sensor_data['exit_status'] = 1
+        exit(config, sensors, sensor_data)
+    # Add kill signal handler:
+    signal.signal(signal.SIGTERM, partial(__exit, config, sensors, sensor_data))
+    # Create a data accessing lock for use by threads:
+    sensor_data['lock'] = Lock()
+    # List for storing threads:
+    all_threads = []
+    # Create and start the polling thread:
+    poll_thread = Thread(target=poll_sensors,
+                         args=(config, dht, gps, sensors, sensor_data))
+    all_threads.append(poll_thread)
+    poll_thread.start()
+    # Create and start the logging thread:
+    log_thread = Thread(target=log_data,
+                         args=(config, sensors, sensor_data))
+    all_threads.append(log_thread)
+    log_thread.start()
+    # Wait for threads to exit:
+    for thread in all_threads:
+        thread.join()
+    exit(config, sensors, sensor_data)
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,231 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+Upload and archive sensor data
+"""
+
+# Standard library imports:
+try:
+    import configparser as ConfigParser
+except ImportError:
+    import ConfigParser
+import glob
+import os
+import socket
+import sys
+import time
+
+# Third party imports:
+from office365.runtime.auth.authentication_context import AuthenticationContext
+from office365.sharepoint.client_context import ClientContext
+
+# Config file section for this program:
+CONFIG_SECTION = 'bib-data-archive'
+# Default configuration values:
+DATA_DIR = '/data/bib-sensor'
+ARCHIVE_DIR = '/data/archive/bib-sensor'
+ARCHIVE_INTERVAL = 600
+ARCHIVE_AGE = 3600
+
+def get_sp_config():
+    """
+    Try to get SharePoint configuration from environment.
+    """
+    # Try to get config values:
+    try:
+        sp_config = {
+            'url': os.environ['SP_URL'],
+            'dir': os.environ['SP_DIR'],
+            'user': os.environ['SP_USER'],
+            'pass': os.environ['SP_PASS']
+        }
+    except:
+        sp_config = None
+    # Return the config:
+    return sp_config
+
+def check_args(sys_args):
+    """
+    Check the program arguments, and return path to config file, if valid
+    """
+    # Check number of arguments, if none, return:
+    if len(sys_args) < 2:
+        return
+    # Config file path is first argument. Try to open it and if succeeds,
+    # return the patht to the config file, else return None:
+    try:
+        with open(sys.argv[1], 'r') as config_fh:
+            config_file = sys.argv[1]
+    except:
+        config_file = None
+    # Return the path to the config file:
+    return config_file
+
+def get_config(config_file, config_section):
+    """
+    Get the configuration, from config file if available
+    """
+    # Init config object:
+    config = {
+        'data_dir': DATA_DIR,
+        'archive_dir': ARCHIVE_DIR,
+        'archive_interval': ARCHIVE_INTERVAL,
+        'archive_age': ARCHIVE_AGE
+    }
+    # If no config file, use default values:
+    if not config_file:
+        return config
+    # Create ConfigParser:
+    config_parser = ConfigParser.RawConfigParser()
+    # Try to read config file:
+    try:
+        config_parser.read_file(open(config_file, 'r'))
+    except AttributeError:
+        config_parser.readfp(open(config_file, 'r'))
+    # Get values from config file, use defaults if not available ...
+    # Data / logging directory:
+    try:
+        config['data_dir'] = config_parser.get(config_section, 'DATA_DIR')
+    except:
+        pass
+    # Archive directory for files which have been uploaded:
+    try:
+        config['archive_dir'] = config_parser.get(
+            config_section, 'ARCHIVE_DIR'
+        )
+    except:
+        pass
+    # Archiving interval in seconds:
+    try:
+        config['archive_interval'] = config_parser.getfloat(
+            config_section, 'ARCHIVE_INTERVAL'
+        )
+    except:
+        pass
+    # If files have been uploaded, and have not been modified for this many
+    # seconds, move to the archive directory:
+    try:
+        config['archive_age'] = config_parser.getfloat(
+            config_section, 'ARCHIVE_AGE'
+        )
+    except:
+        pass
+    # Return the config:
+    return config
+
+def archive_data(config, sp_config):
+    """
+    Upload and archive data
+    """
+    # Get required config values:
+    data_dir = config['data_dir']
+    archive_dir = config['archive_dir']
+    archive_age = config['archive_age']
+    sp_url = sp_config['url']
+    sp_dir = sp_config['dir']
+    sp_user = sp_config['user']
+    sp_pass = sp_config['pass']
+    # Get a list of files in data dir:
+    file_pattern = os.sep.join([data_dir, '*.csv'])
+    data_files = glob.glob(file_pattern)
+    # If no files, return:
+    if not data_files:
+        return
+    # Sort files by modification time, reversed, so most recent file is first
+    # in list:
+    data_files.sort(key=os.path.getmtime, reverse=True)
+    # Try to get credentials for SharePoint connection:
+    try:
+        auth_context = AuthenticationContext(sp_url)
+        auth_context.acquire_token_for_user(sp_user, sp_pass)
+        client_context = ClientContext(sp_url, auth_context)
+    except Exception as ex_msg:
+        err_msg = 'Failed to get credentials for upload\n'
+        sys.stdout.write(err_msg)
+        sys.stdout.write('{0}\n'.format(ex_msg))
+        return
+    # Get hostname:
+    host_name = socket.gethostname()
+    # Remote directory for this host:
+    remote_dir = '/'.join([sp_dir, host_name])
+    # Try to make sure a directory exists on the SharePoint site for this host:
+    try:
+        client_context.web.ensure_folder_path(remote_dir).execute_query()
+    except Exception as ex_msg:
+        err_msg = 'Failed to create remote directory {0}\n'.format(remote_dir)
+        sys.stdout.write(err_msg)
+        sys.stdout.write('{0}\n'.format(ex_msg))
+        return
+    # Loop through files in data directory:
+    for i, data_file in enumerate(data_files):
+        # Read in file data:
+        with open(data_file, 'rb') as data_fh:
+            file_data = data_fh.read()
+        # Get base file name:
+        file_name = os.path.basename(data_file)
+        # Try to upload the file:
+        try:
+            err_msg = 'Uploading file {0}\n'.format(file_name)
+            sys.stdout.write(err_msg)
+            web_folder = client_context.web.get_folder_by_server_relative_url(
+                remote_dir
+            )
+            web_folder.upload_file(file_name, file_data).execute_query()
+        except Exception as ex_msg:
+            err_msg = 'Failed to upload file {0}\n'.format(file_name)
+            sys.stdout.write(err_msg)
+            sys.stdout.write('{0}\n'.format(ex_msg))
+            continue
+        # Never archive the most recent file or sysinfo file:
+        if i > 0 and data_file.split(os.sep)[-1] != 'sysinfo.csv':
+            # If file modification time is older than specified time for
+            # archiving:
+            if (time.time() - os.path.getmtime(data_file)) > archive_age:
+                # Move the file to the archive directory:
+                try:
+                    err_msg = 'Archiving file {0}\n'.format(file_name)
+                    sys.stdout.write(err_msg)
+                    archive_file = os.sep.join([archive_dir, file_name])
+                    os.rename(data_file, archive_file)
+                except Exception as ex_msg:
+                    err_msg = 'Failed to archive file {0}\n'.format(file_name)
+                    sys.stdout.write(err_msg)
+                    sys.stdout.write('{0}\n'.format(ex_msg))
+                    continue
+
+def main():
+    """
+    Main program function
+    """
+    # Check for sharepoint settings in environment or exit:
+    sp_config = get_sp_config()
+    # If no config, exit:
+    if sp_config is None:
+        err_msg = 'No sharepoint Configuration found. Exiting\n'
+        sys.stdout.write(err_msg)
+        sys.exit()
+    # Check arguments:
+    config_file = check_args(sys.argv)
+    # Display a message:
+    if config_file:
+        err_msg = 'Using config file: {0}\n'.format(config_file)
+    else:
+        err_msg = 'Config file not found. Using default values\n'
+    sys.stdout.write(err_msg)
+    # Get the configuration values:
+    config = get_config(config_file, CONFIG_SECTION)
+    # Continue to run until exit:
+    while True:
+        # Try to upload and archive data:
+        try:
+            archive_data(config, sp_config)
+        # Or wait and try again:
+        except Exception as ex_msg:
+            sys.stdout.write('{0}\n'.format(ex_msg))
+            pass
+        # Sleep for specified time:
+        time.sleep(config['archive_interval'])
+
+if __name__ == '__main__':
+    main()

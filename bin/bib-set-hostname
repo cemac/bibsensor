@@ -1,0 +1,57 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+
+"""
+If hostname is set to 'bibsensor-00' (the default), rename to
+bibsensor-macaddress, where 'macaddess' is the mac address returned
+by uuid.getnose()
+"""
+
+# Standard library imports:
+import subprocess
+import sys
+import uuid
+
+def main():
+    """
+    Main program function
+    """
+    # Use uuid to get sytem mac address:
+    host_mac = '{0:02x}'.format(uuid.getnode())
+    # Updated hostname:
+    new_hostname = 'bibsensor-{0}'.format(host_mac)
+    # Presume no reboot required:
+    do_reboot = False
+    # For each host file:
+    for hosts_file in ['/etc/hosts', '/etc/hostname']:
+        # Check file. Read in lines:
+        with open(hosts_file, 'r') as hosts_fh:
+            hosts_lines = hosts_fh.readlines()
+        # List for storing updated lines:
+        new_hosts_lines = []
+        # Loop through hosts lines:
+        for hosts_line in hosts_lines:
+            # Replace default hostname:
+            new_hosts_line = hosts_line.replace(
+                'bibsensor-00\n',
+                '{0}\n'.format(new_hostname)
+            )
+            # Append to new_hosts_lines list:
+            new_hosts_lines.append(new_hosts_line)
+        # If hosts lines have changed:
+        if hosts_lines != new_hosts_lines:
+            # Will need a reboot:
+            do_reboot = True
+            # Display a message:
+            err_msg = 'Setting hostname to bibsensor-{0}\n'.format(host_mac)
+            sys.stdout.write(err_msg)
+            # Update hosts file:
+            with open(hosts_file, 'w') as hosts_fh:
+                hosts_fh.writelines(new_hosts_lines)
+    # If a reboot is required:
+    if do_reboot:
+        # Reboot:
+        cmd_status = subprocess.call(['reboot'])
+
+if __name__ == '__main__':
+    main()

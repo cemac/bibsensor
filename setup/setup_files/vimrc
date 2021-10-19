@@ -1,0 +1,11 @@
+syntax on
+set hlsearch
+set backspace=indent,eol,start
+set statusline=%<%f\ %h%m%r%=%-14.(%l,%c%V%)\ %P
+set laststatus=2
+set showmode
+set mouse-=a
+if has("autocmd")
+  au BufReadPost * if line("'\"") > 0 && line("'\"") <= line("$")
+    \| exe "normal g'\"" | endif
+endif

@@ -1,0 +1,12 @@
+[Unit]
+Description=BiB WiFi configuration web service
+After=multi-user.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/bibsensor/www/bib-ap-web /etc/bibsensor/bibsensor.conf
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

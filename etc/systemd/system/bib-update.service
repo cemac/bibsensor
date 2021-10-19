@@ -1,0 +1,13 @@
+[Unit]
+Description=Check for and run updates
+After=multi-user.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/bibsensor/bin/bib-update /etc/bibsensor/bibsensor.conf
+Restart=on-failure
+RestartSec=300
+
+[Install]
+WantedBy=multi-user.target

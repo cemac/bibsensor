@@ -1,0 +1,15 @@
+[Unit]
+Description=BiB data archiving and uploading service
+After=multi-user.target
+
+[Service]
+User=sensorpi
+Type=simple
+Environment=PYTHONUNBUFFERED=1 PATH=/opt/bibsensor/venvs/bib-data-archive/bin
+EnvironmentFile=/home/sensorpi/.bib-data-archive
+ExecStart=/opt/bibsensor/bin/bib-data-archive /etc/bibsensor/bibsensor.conf
+Restart=on-failure
+RestartSec=300
+
+[Install]
+WantedBy=multi-user.target

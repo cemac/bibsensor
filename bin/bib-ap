@@ -1,0 +1,351 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+
+"""
+Start the sensor configuration wireless network, if required.
+
+If the wireless connection has not been configured, then the AP will start,
+using hostapd and dnsmasq.
+
+If the wireless has been configured, but no access to the outside world is
+available after a specified time, then the AP will be started for a specified
+period.
+
+The program expects one argument - the location of the config file:
+
+  bib-ap /etc/bibsensor/bibsensor.conf
+"""
+
+# Standard library imports:
+try:
+    import configparser as ConfigParser
+except ImportError:
+    import ConfigParser
+import os
+import socket
+import subprocess
+import sys
+import time
+
+# Config file section for this program:
+CONFIG_SECTION = 'bib-ap'
+# Default configuration values:
+AP_IF = 'wlan0'
+AP_IP = '10.3.141.1'
+AP_PASS = 'bibsensor'
+AP_CHANNEL = 7
+AP_DELAY = 60
+AP_TIMEOUT = 600
+AP_STATUS_FILE = '/root/.bib-ap'
+CHECK_HOST = '8.8.8.8'
+CHECK_PORT = 53
+# Configuration values which are not expected to change:
+DNSM_CONF_TARGET = '/opt/bibsensor/etc/dnsmasq.d/090_bibsensor.conf'
+DNSM_CONF_LINK = '/etc/dnsmasq.d/090_bibsensor.conf'
+APD_CONF_IN = '/opt/bibsensor/etc/hostapd/hostapd.conf'
+APD_CONF_OUT = '/etc/hostapd/hostapd.conf'
+
+def check_args(sys_args):
+    """
+    Check the program arguments, and return path to config file, if valid
+    """
+    # Check number of arguments, if none, return:
+    if len(sys_args) < 2:
+        return
+    # Config file path is first argument. Try to open it and if succeeds,
+    # return the patht to the config file, else return None:
+    try:
+        with open(sys.argv[1], 'r') as config_fh:
+            config_file = sys.argv[1]
+    except:
+        config_file = None
+    # Return the path to the config file:
+    return config_file
+
+def get_config(config_file, config_section):
+    """
+    Get the configuration, from config file if available
+    """
+    # Init config object:
+    config = {
+        'ap_if': AP_IF,
+        'ap_ip': AP_IP,
+        'ap_pass': AP_PASS,
+        'ap_channel': AP_CHANNEL,
+        'ap_delay': AP_DELAY,
+        'ap_timeout': AP_TIMEOUT,
+        'ap_status_file': AP_STATUS_FILE,
+        'check_host': CHECK_HOST,
+        'check_port': CHECK_PORT
+    }
+
+    # If no config file, use default values:
+    if not config_file:
+        return config
+    # Create ConfigParser:
+    config_parser = ConfigParser.RawConfigParser()
+    # Try to read config file:
+    try:
+        config_parser.read_file(open(config_file, 'r'))
+    except AttributeError:
+        config_parser.readfp(open(config_file, 'r'))
+    # Get values from config file, use defaults if not available ...
+    # Interface for use as access point:
+    try:
+        config['ap_if'] = config_parser.get(config_section, 'AP_IF')
+    except:
+        pass
+    # IP address to use as AP:
+    try:
+        config['ap_ip'] = config_parser.get(config_section, 'AP_IP')
+    except:
+        pass
+    # Passphrase for wireless network:
+    try:
+        config['ap_pass'] = config_parser.get(config_section, 'AP_PASS')
+    except:
+        pass
+    # Channel for wireless network:
+    try:
+        config['ap_channel'] = config_parser.getint(
+            config_section, 'AP_CHANNEL'
+        )
+    except:
+        pass
+    # Start AP after this many seconds, if there is no connection, even if wifi
+    # has been configured:
+    try:
+        config['ap_delay'] = config_parser.getfloat(config_section, 'AP_DELAY')
+    except:
+        pass
+    # Then run for this many seconds, before stopping:
+    try:
+        config['ap_timeout'] = config_parser.getfloat(
+            config_section, 'AP_TIMEOUT'
+        )
+    except:
+        pass
+    # File fore storing wireless configuration status:
+    try:
+        config['ap_status_file'] = config_parser.get(
+            config_section, 'AP_STATUS_FILE'
+        )
+    except:
+        pass
+    # Host for checking external connection:
+    try:
+        config['check_host'] = config_parser.get(config_section, 'CHECK_HOST')
+    except:
+        pass
+    # Port for checking external connection:
+    try:
+        config['check_port'] = config_parser.getint(
+            config_section, 'CHECK_PORT'
+        )
+    except:
+        pass
+    # Return the config:
+    return config
+
+def set_status(config, status=0):
+    """
+    Write AP configuration status to the status file
+    """
+    # Get the status file form the config:
+    status_file = config['ap_status_file']
+    # Write the status to the file:
+    with open(status_file, 'w') as status_fh:
+        status_fh.write('{0}\n'.format(status))
+
+def get_status(config):
+    """
+    Get AP configuration status from the status file
+    """
+    # Get the status file form the config:
+    status_file = config['ap_status_file']
+    # If the file does not exist, create it:
+    if not os.path.exists(status_file):
+        status = 0
+        set_status(config, status)
+        return status
+    # Otherwise, read status from file and return it:
+    with open(status_file, 'r') as status_fh:
+        status = status_fh.readline()
+    # Return the status as an integer:
+    return int(status)
+
+def get_connection_status(config, timeout=3):
+    """
+    Get the current connection status
+    """
+    # Get the host to check:
+    check_host = config['check_host']
+    # If we can resolve the host name, presume all is well:
+    try:
+        check_hostname = socket.gethostbyaddr(check_host)[0]
+        return 2
+    except:
+        pass
+    # If that fails, see if we can connect ot the IP address on the specified
+    # port:
+    check_port = config['check_port']
+    try:
+        check_socket = socket.create_connection((check_host, check_port),
+                                                timeout)
+        check_socket.close()
+        return 1
+    except:
+        return 0
+
+def tidy_up(config):
+    """
+    Tidy up temporary files
+    """
+    # Get wifi device and address:
+    ap_if = config['ap_if']
+    ap_ip = config['ap_ip']
+    # Add netmask to IP address:
+    ap_ip_nm = '{0}/24'.format(ap_ip)
+    # Stop web service:
+    cmd_status = subprocess.call(['systemctl', 'stop', 'bib-ap-web'])
+    # Remove dnsmasq config file:
+    try:
+        os.remove(DNSM_CONF_LINK)
+    except:
+        pass
+    # Restart dnsmasq service:
+    cmd_status = subprocess.call(['systemctl', 'restart', 'dnsmasq'])
+    # Remove hostapd config file:
+    try:
+        os.remove(APD_CONF_OUT)
+    except:
+        pass
+    # Stop hostapd service:
+    cmd_status = subprocess.call(['systemctl', 'stop', 'hostapd'])
+    # Remove entry from hosts file:
+    hosts_entry = '{0} bibsensor'.format(ap_ip)
+    with open('/etc/hosts', 'r') as hosts_fh:
+        hosts_lines = hosts_fh.readlines()
+    with open('/etc/hosts', 'w') as hosts_fh:
+        for hosts_line in hosts_lines:
+            if hosts_line.rstrip('\n') != hosts_entry:
+                hosts_fh.write(hosts_line)
+    # Remove AP IP address using ip command:
+    cmd_status = subprocess.call(['ip', 'address', 'del', ap_ip_nm, 'dev',
+                                  ap_if])
+    # Start wpa_supplicant and dhcpcd:
+    cmd_status = subprocess.call(['systemctl', 'start', 'wpa_supplicant'])
+    cmd_status = subprocess.call(['systemctl', 'start', 'dhcpcd'])
+
+def start_ap(config, status):
+    """
+    Configure wifi device and start AP service
+    """
+    # Get wifi device and address to be used:
+    ap_if = config['ap_if']
+    ap_ip = config['ap_ip']
+    # Passphrase for AP:
+    ap_pass = config['ap_pass']
+    # Channel for AP:
+    ap_channel = '{0}'.format(config['ap_channel'])
+    # Timeout value, if required:
+    ap_timeout = config['ap_timeout']
+    # Add netmask to IP address:
+    ap_ip_nm = '{0}/24'.format(ap_ip)
+    # Stop dhcpcd and wpa_supplicant:
+    cmd_status = subprocess.call(['systemctl', 'stop', 'dhcpcd'])
+    cmd_status = subprocess.call(['systemctl', 'stop', 'wpa_supplicant'])
+    # Use ip command to set ip address:
+    cmd_status = subprocess.call(['ip', 'address', 'add', ap_ip_nm, 'dev',
+                                  ap_if])
+    cmd_status = subprocess.call(['ip', 'link', 'set', ap_if, 'up'])
+    # Add entry to hosts file:
+    with open('/etc/hosts', 'a') as hosts_fh:
+        hosts_entry = '{0} bibsensor\n'.format(ap_ip)
+        hosts_fh.write(hosts_entry)
+    # Create symlink to dnsmasq config for AP:
+    if os.path.exists(DNSM_CONF_LINK):
+        os.remove(DNSM_CONF_LINK)
+    os.symlink(DNSM_CONF_TARGET, DNSM_CONF_LINK)
+    # Restart dnsmasq service:
+    cmd_status = subprocess.call(['systemctl', 'restart', 'dnsmasq'])
+    # Set up hostapd config. read in template:
+    with open(APD_CONF_IN, 'r') as apd_fh:
+        apd_conf = apd_fh.readlines()
+    apd_conf = ''.join(apd_conf)
+    # Replace values with those from config:
+    apd_conf = apd_conf.replace('XWLANX', ap_if)
+    apd_conf = apd_conf.replace('XSSIDX', socket.gethostname())
+    apd_conf = apd_conf.replace('XWPA_PASSPHRASEX', ap_pass)
+    apd_conf = apd_conf.replace('XCHANNELX', ap_channel)
+    # Create the hostapd config file:
+    with open(APD_CONF_OUT, 'w') as apd_fh:
+        apd_fh.write(apd_conf)
+    # Start hostapd service:
+    cmd_status = subprocess.call(['systemctl', 'start', 'hostapd'])
+    # Start web service to enable wifi configuration:
+    cmd_status = subprocess.call(['systemctl', 'start', 'bib-ap-web'])
+    # If status is 2, stop the service after specified time, and reboot:
+    if status == 2:
+        time.sleep(config['ap_timeout'])
+        tidy_up(config)
+        sys.exit(0)
+
+def main():
+    """
+    Main program function
+    """
+    # Check arguments:
+    config_file = check_args(sys.argv)
+    # Display a message:
+    if config_file:
+        err_msg = 'Using config file: {0}\n'.format(config_file)
+    else:
+        err_msg = 'Config file not found. Using default values\n'
+    sys.stdout.write(err_msg)
+    # Get the configuration values:
+    config = get_config(config_file, CONFIG_SECTION)
+    # Tidy up first:
+    tidy_up(config)
+    # Check AP configuration status, where Status should be one of:
+    #   0 : Not configured
+    #   1 : Just configured, needs checking
+    #   2 : Configured and checked
+    ap_status = get_status(config)
+    # If configured ... :
+    if ap_status == 2:
+        # ... wait for specified time:
+        time.sleep(config['ap_delay'])
+        # Check if connection to the outside world is active:
+        connection_status = get_connection_status(config)
+        # If connection seems to be o.k., exit:
+        if connection_status == 2:
+            tidy_up(config)
+            err_msg = 'Everything seems to be configured and working.'
+            err_msg = ' '.join([err_msg, 'Exiting\n'])
+            sys.stdout.write(err_msg)
+            sys.exit(0)
+        # Else, thing do not appear to be working:
+        start_ap(config, ap_status)
+    # If only just configured (status is 1):
+    if ap_status == 1:
+        # Wait for specified time:
+        time.sleep(config['ap_delay'])
+        # Check if connection to the outside world is active:
+        connection_status = get_connection_status(config)
+        # If connection seems to be o.k., update status file and exit:
+        if connection_status == 2:
+            set_status(config, 2)
+            tidy_up(config)
+            err_msg = 'Everything seems to be configured and working.'
+            err_msg = ' '.join([err_msg, 'Exiting\n'])
+            sys.stdout.write(err_msg)
+            sys.exit(0)
+        # Else, reset status to 0:
+        ap_status = 0
+        set_status(config, ap_status)
+    # If we get here, wifi is not configured successfully:
+    start_ap(config, ap_status)
+
+if __name__ == '__main__':
+    main()

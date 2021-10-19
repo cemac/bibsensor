@@ -1,0 +1,12 @@
+[Unit]
+Description=Sensor status LED
+After=network.target
+
+[Service]
+Type=simple
+User=sensorpi
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/bibsensor/bin/bib-status-led /etc/bibsensor/bibsensor.conf
+
+[Install]
+WantedBy=multi-user.target

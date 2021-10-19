@@ -1,0 +1,13 @@
+[Unit]
+Description=Update sensor hostname, if required
+DefaultDependencies=no
+After=network-online.target local-fs.target systemd-tmpfiles-setup.service
+Before=bib-ap.service bib-data-archive.service
+
+[Service]
+ExecStart=/opt/bibsensor/bin/bib-set-hostname
+Type=oneshot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

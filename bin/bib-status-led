@@ -1,0 +1,235 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+
+"""
+Update the status of the BiB PCB LED, depending on the status of the
+connection to the outside world
+
+If the system can resolve an external address, then the connection is
+presumed to be good and the LED will be on.
+
+If the system can connect to the specified port on the specified address
+but not resolve the name, then the led will blink periodically.
+
+If neither of these are possible, the LED will be off.
+
+The program expects one argument - the location of the config file, e.g.:
+
+  bib-status-led /etc/bibsensor/bibsensor.conf
+"""
+
+# Standard library imports:
+try:
+    import configparser as ConfigParser
+except ImportError:
+    import ConfigParser
+from functools import partial
+import os
+import signal
+import socket
+import sys
+import time
+# Third party imports:
+import RPi.GPIO as GPIO
+
+# Config file section for this program:
+CONFIG_SECTION = 'bib-status-led'
+# Default configuration values:
+CHECK_HOST = '8.8.8.8'
+CHECK_PORT = 53
+LED_GPIO = 5
+STATUS_POLL_DELAY = 10
+
+def check_args(sys_args):
+    """
+    Check the program arguments, and return path to config file, if valid
+    """
+    # Check number of arguments, if none, return:
+    if len(sys_args) < 2:
+        return
+    # Config file path is first argument. Try to open it and if succeeds,
+    # return the patht to the config file, else return None:
+    try:
+        with open(sys.argv[1], 'r') as config_fh:
+            config_file = sys.argv[1]
+    except:
+        config_file = None
+    # Return the path to the config file:
+    return config_file
+
+def get_config(config_file, config_section):
+    """
+    Get the configuration, from config file if available
+    """
+    # Init config object:
+    config = {
+        'check_host': CHECK_HOST,
+        'check_port': CHECK_PORT,
+        'led_gpio': LED_GPIO,
+        'poll_delay': STATUS_POLL_DELAY
+    }
+    # If no config file, use default values:
+    if not config_file:
+        return config
+    # Create ConfigParser:
+    config_parser = ConfigParser.RawConfigParser()
+    # Try to read config file:
+    try:
+        config_parser.read_file(open(config_file, 'r'))
+    except AttributeError:
+        config_parser.readfp(open(config_file, 'r'))
+    # Get values from config file, use defaults if not available ...
+    # Host for checking external connection:
+    try:
+        config['check_host'] = config_parser.get(config_section, 'CHECK_HOST')
+    except:
+        pass
+    # Port for checking external connection:
+    try:
+        config['check_port'] = config_parser.getint(
+            config_section, 'CHECK_PORT'
+        )
+    except:
+        pass
+    # LED GPIO number:
+    try:
+        config['led_gpio'] = config_parser.getint(config_section, 'LED_GPIO')
+    except:
+        pass
+    # Polling interval:
+    try:
+        config['poll_delay'] = config_parser.getfloat(
+            config_section, 'STATUS_POLL_DELAY'
+        )
+    except:
+        pass
+    # Return the config:
+    return config
+
+def init_gpio(config):
+    """
+    Initialise the LED GPIO. Switch off initially.
+    """
+    # Get the LED GPIO number:
+    led_gpio = config['led_gpio']
+    # Set the GPIO mode:
+    GPIO.setmode(GPIO.BCM)
+    # Disable warnings:
+    GPIO.setwarnings(False)
+    # Set up the LED GPIO and switch it off:
+    GPIO.setup(led_gpio, GPIO.OUT)
+    GPIO.output(led_gpio, GPIO.LOW)
+
+def get_status(config, timeout=3):
+    """
+    Get the current connection status
+    """
+    # Get the host to check:
+    check_host = config['check_host']
+    # If we can resolve the host name, presume all is well:
+    try:
+        check_hostname = socket.gethostbyaddr(check_host)[0]
+        return 2
+    except:
+        pass
+    # If that fails, see if we can connect to the IP address on the specified
+    # port:
+    check_port = config['check_port']
+    try:
+        check_socket = socket.create_connection((check_host, check_port),
+                                                timeout)
+        check_socket.close()
+        return 1
+    except:
+        return 0
+
+def led_on(config):
+    """
+    Switch the LED on
+    """
+    # Get the LED GPIO number:
+    led_gpio = config['led_gpio']
+    # Switch the LED on:
+    GPIO.output(led_gpio, GPIO.HIGH)
+
+def led_off(config):
+    """
+    Switch the LED off
+    """
+    # Get the LED GPIO number:
+    led_gpio = config['led_gpio']
+    # Switch the LED off:
+    GPIO.output(led_gpio, GPIO.LOW)
+
+def led_blink(config, blink_count=3, blink_delay=0.2):
+    """
+    Switch the LED off
+    """
+    # Get the LED GPIO number:
+    led_gpio = config['led_gpio']
+    # Switch the LED off:
+    GPIO.output(led_gpio, GPIO.LOW)
+    # blink the LED:
+    for i in range(blink_count):
+        GPIO.output(led_gpio, GPIO.HIGH)
+        time.sleep(blink_delay)
+        GPIO.output(led_gpio, GPIO.LOW)
+        time.sleep(blink_delay)
+
+def exit(config, status=0):
+    """
+    Turn off led and exit:
+    """
+    # Turn off the LED:
+    led_off(config)
+    # Exit:
+    err_msg = 'Exiting\n'
+    sys.stdout.write(err_msg)
+    sys.exit(status)
+
+def __exit(config, signal, frame):
+    """
+    Exit on kill signal
+    """
+    # Send sensor information to exit function:
+    exit(config)
+
+def main():
+    """
+    Main program function
+    """
+    # Check arguments:
+    config_file = check_args(sys.argv)
+    # Display a message:
+    if config_file:
+        err_msg = 'Using config file: {0}\n'.format(config_file)
+    else:
+        err_msg = 'Config file not found. Using default values\n'
+    sys.stdout.write(err_msg)
+    # Get the configuration values:
+    config = get_config(config_file, CONFIG_SECTION)
+    # Init the GPIO:
+    init_gpio(config)
+    # Get the polling delay / interval:
+    poll_delay = config['poll_delay']
+    # Add kill signal handler:
+    signal.signal(signal.SIGTERM, partial(__exit, config))
+    # Begin polling:
+    while True:
+        # Get the status of the connection to the outside world:
+        status = get_status(config)
+        # If all appears to be well, switch on the LED:
+        if status == 2:
+            led_on(config)
+        # If DNS doesn't appear to be available, but connection to the
+        # outside world appears to be o.k., blink the LED:
+        elif status == 1:
+            led_blink(config)
+        # Else, switch off the LED:
+        else:
+            led_off(config)
+        # Sleep for specified interval:
+        time.sleep(poll_delay)
+
+if __name__ == '__main__':
+    main()

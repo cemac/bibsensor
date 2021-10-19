@@ -1,0 +1,47 @@
+#!/bin/bash
+
+# One argument, 'load' or 'save':
+if [ "${1}" != "load" -a "${1}" != "save" ] ; then
+  echo "usage $(basename ${0}): <load|save>"
+  exit 1
+fi
+
+# Load RTC overlay:
+ls -ld /dev/rtc >& /dev/null || dtoverlay i2c-rtc ds1307 >& /dev/null
+COUNT=0
+while [ ${COUNT} -lt 10 ]
+do
+  ls -ld /dev/rtc >& /dev/null && break
+  COUNT=$((${COUNT}+1))
+  sleep 0.5
+done
+
+# Check for RTC, 0 is true:
+hwclock -r > /dev/null 2>&1
+HAS_RTC=${?}
+
+# If loading:
+if [ "${1}" = "load" ] ; then
+  # If RTC is present:
+  if [ "${HAS_RTC}" = "0" ] ; then
+    # Set system time from RTC:
+    echo "Setting system clock from RTC"
+    hwclock -s -u
+  # No RTC:
+  else
+    # Set system time from fake hwclock:
+    echo "Setting system clock from fake-hwclock"
+    /sbin/fake-hwclock load
+  fi
+# Else saving:
+else
+  # If RTC is present:
+  if [ "${HAS_RTC}" = "0" ] ; then
+    # Save system time to RTC:
+    echo "Setting RTC from system clock"
+    hwclock -w -u
+  fi
+  # Always save system time to fake hwclock:
+  echo "Setting fake-hwclock from system clock"
+  /sbin/fake-hwclock save
+fi

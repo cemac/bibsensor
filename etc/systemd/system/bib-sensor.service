@@ -1,0 +1,17 @@
+[Unit]
+Description=BiB sensor logging service
+After=multi-user.target
+StartLimitIntervalSec=10800
+StartLimitBurst=3
+OnFailure=systemd-reboot.service
+
+[Service]
+User=sensorpi
+Type=simple
+Environment=PYTHONUNBUFFERED=1 PATH=/opt/bibsensor/venvs/bib-sensor/bin
+ExecStart=/opt/bibsensor/bin/bib-sensor /etc/bibsensor/bibsensor.conf
+Restart=always
+RestartSec=300
+
+[Install]
+WantedBy=multi-user.target
