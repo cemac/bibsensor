@@ -347,6 +347,8 @@ fi
 if [ ! -e "/root/.ssh/config" ] ; then
   cat > /root/.ssh/config <<EOF
 host github.com
+  Hostname ssh.github.com
+  Port 443
   UserKnownHostsFile = /dev/null
   StrictHostKeyChecking = no
 EOF
