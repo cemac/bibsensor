@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# BiB Raspberry Pi sensor set script
+# BiB Raspberry Pi sensor setup script
 #
 # This is intended for use on a system installed with a Raspbian 'OS Lite'
 # image, where the version of Raspbian is 'Buster':
