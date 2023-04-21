@@ -41,6 +41,7 @@ SENSOR_TIMEOUT = 1500
 DHT_GPIO_POWER = 17
 DHT_GPIO_OUT = 4
 DHT_DECIMALS = 1
+UPDATE_TIMESTAMP = '/dev/shm/.bib_update'
 
 def check_args(sys_args):
     """
@@ -72,7 +73,9 @@ def get_config(config_file, config_section):
         'nodata_value': NODATA_VALUE,
         'sensor_timeout': SENSOR_TIMEOUT,
         'dht_gpio_power': DHT_GPIO_POWER,
-        'dht_gpio_out': DHT_GPIO_OUT
+        'dht_gpio_out': DHT_GPIO_OUT,
+        'dht_decimals': DHT_DECIMALS,
+        'update_timestamp': UPDATE_TIMESTAMP
     }
     # If no config file, use default values:
     if not config_file:
@@ -144,6 +147,11 @@ def get_config(config_file, config_section):
         config['dht_decimals'] = config_parser.getint(
             config_section, 'DHT_DECIMALS'
         )
+    except:
+        pass
+    # File which contains date of most recent update:
+    try:
+        config['update_timestamp'] = config_parser.get(config_section, 'UPDATE_TIMESTAMP')
     except:
         pass
     # Return the config:
@@ -272,7 +280,7 @@ def get_gps():
     # Return the GPS:
     return gps
 
-def get_system_info(sensors):
+def get_system_info(config, sensors):
     """
     Get some system information
     """
@@ -307,6 +315,11 @@ def get_system_info(sensors):
     # Get sps serial:
     if sensors['SPS'] is not None:
         sysinfo['sps_serial'] = sensors['SPS'].get_serial_no()
+    # Get last update time, if available:
+    last_update_file = config['update_timestamp']
+    if os.path.exists(last_update_file):
+        with open(last_update_file, 'r') as update_file:
+            sysinfo['last_update'] = update_file.readline().strip()
     # Return the information:
     return sysinfo
 
@@ -535,7 +548,7 @@ def log_data(config, sensors, sensor_data):
         # Acquire the lock:
         sensor_data['lock'].acquire()
         # Get some system information:
-        sysinfo = get_system_info(sensors)
+        sysinfo = get_system_info(config, sensors)
         # System information output filename:
         sysinfo_out_file = 'sysinfo.csv'
         sysinfo_out_path = os.sep.join(
