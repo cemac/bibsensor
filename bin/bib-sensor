@@ -290,7 +290,8 @@ def get_system_info(config, sensors):
       'pi_serial': None,
       'ip_addresses': None,
       'r1_serial': None,
-      'sps_serial': None
+      'sps_serial': None,
+      'last_update': None
     }
     # Get pi model and serial:
     cpuinfo = subprocess.Popen(
