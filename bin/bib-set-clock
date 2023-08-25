@@ -7,13 +7,13 @@ if [ "${1}" != "load" -a "${1}" != "save" ] ; then
 fi
 
 # Load RTC overlay:
-ls -ld /dev/rtc >& /dev/null || dtoverlay i2c-rtc ds1307 >& /dev/null
 COUNT=0
-while [ ${COUNT} -lt 10 ]
+while [ ${COUNT} -lt 20 ]
 do
+  ls -ld /dev/rtc >& /dev/null || dtoverlay i2c-rtc ds1307 >& /dev/null
   ls -ld /dev/rtc >& /dev/null && break
   COUNT=$((${COUNT}+1))
-  sleep 0.5
+  sleep 1
 done
 
 # Check for RTC, 0 is true:

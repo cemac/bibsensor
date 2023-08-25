@@ -323,9 +323,9 @@ def start_ap(config, status):
         time.sleep(ap_startup_time)
         tidy_up(config)
         return
-    # If status is 2, stop the service after specified time, and reboot:
+    # If status is 2, stop the service after specified time:
     if status == 2:
-        time.sleep(config['ap_timeout'])
+        time.sleep(ap_timeout)
         tidy_up(config)
         sys.exit(0)
 

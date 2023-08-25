@@ -1,5 +1,5 @@
 [Unit]
-Description=Sensor status LED
+Description=BiB Sensor status LED
 After=network.target
 
 [Service]

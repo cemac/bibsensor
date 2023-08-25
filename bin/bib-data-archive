@@ -51,7 +51,7 @@ def check_args(sys_args):
     """
     # Check number of arguments, if none, return:
     if len(sys_args) < 2:
-        return
+        return None
     # Config file path is first argument. Try to open it and if succeeds,
     # return the patht to the config file, else return None:
     try:
@@ -223,7 +223,6 @@ def main():
         # Or wait and try again:
         except Exception as ex_msg:
             sys.stdout.write('{0}\n'.format(ex_msg))
-            pass
         # Sleep for specified time:
         time.sleep(config['archive_interval'])
 

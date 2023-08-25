@@ -4,7 +4,7 @@
 """
 If hostname is set to 'bibsensor-00' (the default), rename to
 bibsensor-macaddress, where 'macaddess' is the mac address returned
-by uuid.getnose()
+by uuid.getnode()
 """
 
 # Standard library imports:

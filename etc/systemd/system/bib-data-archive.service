@@ -1,5 +1,5 @@
 [Unit]
-Description=BiB data archiving and uploading service
+Description=BiB Sensor data archiving and uploading service
 After=multi-user.target
 
 [Service]

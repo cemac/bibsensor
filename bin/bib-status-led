@@ -24,7 +24,6 @@ try:
 except ImportError:
     import ConfigParser
 from functools import partial
-import os
 import signal
 import socket
 import sys
@@ -46,9 +45,9 @@ def check_args(sys_args):
     """
     # Check number of arguments, if none, return:
     if len(sys_args) < 2:
-        return
+        return None
     # Config file path is first argument. Try to open it and if succeeds,
-    # return the patht to the config file, else return None:
+    # return the path to the config file, else return None:
     try:
         with open(sys.argv[1], 'r') as config_fh:
             config_file = sys.argv[1]
@@ -191,7 +190,7 @@ def __exit(config, signal, frame):
     """
     Exit on kill signal
     """
-    # Send sensor information to exit function:
+    # Send config information to exit function:
     exit(config)
 
 def main():
