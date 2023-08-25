@@ -303,6 +303,13 @@ def get_system_info(config, sensors):
             sysinfo['pi_model'] = values[1].strip()
         if values[0].strip().replace('\t', '') == 'Serial':
             sysinfo['pi_serial'] = values[1].strip()
+    # Get system hostname:
+    hostnameinfo = subprocess.Popen(
+        ['/usr/bin/hostname'], stdout=subprocess.PIPE
+    )
+    sysinfo['hostname'] = (
+        hostnameinfo.stdout.read().decode('utf-8').rstrip('\n').strip()
+    )
     # Get system ip addresses:
     ipinfo = subprocess.Popen(
         ['/usr/bin/hostname', '-I'], stdout=subprocess.PIPE
