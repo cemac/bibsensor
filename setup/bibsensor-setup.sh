@@ -3,20 +3,16 @@
 # BiB Raspberry Pi sensor setup script
 #
 # This is intended for use on a system installed with a Raspbian 'OS Lite'
-# image, where the version of Raspbian is 'Buster':
+# image, where the version of Raspbian is 'Bullseye':
 #
 #   https://www.raspberrypi.org/software/operating-systems/
 #
 # On first boot / before running this script, the following is expected:
 #
-# * Log in with default pi user
+# * Create user with username `sensorpi` and set password
+# * Log in with as `sensorpi` user
 # * Use `sudo -i` to switch to `root` user
 # * Set root password with `passwd`
-# * Log out and log back in as `root` user
-# * Rename `pi` user to `sensorpi` and move home directory:
-#     `usermod -m -d /home/sensorpi -l sensorpi pi`
-# * Set password for `sensorpi` user:
-#     `passwd sensorpi`
 # * Enable ssh:
 #     `systemctl enable ssh`
 # * May as well force a file system check on next boot:
@@ -44,8 +40,7 @@ apt-get -y update
 apt-get -y upgrade
 apt-get -y dist-upgrade
 apt-get -y autoremove
-apt purge $(dpkg -l | awk '/^rc/ { print $2 }')
-apt-get -y clean
+apt purge -y $(dpkg -l | awk '/^rc/ { print $2 }')
 
 # Set up / enable the chrony time service:
 apt-get -y install chrony
@@ -58,15 +53,13 @@ if [ ! -e "/etc/chrony/chrony.conf.install" ] ; then
     /etc/chrony/chrony.conf
 fi
 
-# Install some useful packages:
-apt-get -y install chkconfig vim-nox git screen python3-venv lsof unclutter
+# Install some possibly useful packages:
+apt-get -y install chkconfig vim-nox git screen python3-venv lsof minicom unclutter
 
 # Install some bits which may be needed for sensor code:
 apt-get -y install i2c-tools libopenjp2-7 libopenjp2-7-dev libopenjp2-tools \
-                   python-dev python3-dev python-rpi.gpio python3-rpi.gpio \
-                   python-serial python3-serial python-smbus python3-smbus \
-                   python-arrow python3-arrow python-numpy python3-numpy \
-                   python-spidev python3-spidev
+                   python3-dev python3-rpi.gpio python3-serial python3-smbus \
+                   python3-arrow python3-numpy python3-spidev
 
 # Set up vimrc.local file:
 if [ ! -e "/etc/vim/vimrc.local" ] ; then
@@ -82,7 +75,7 @@ fi
 if [ ! -e "/home/sensorpi/.vimrc" ] ; then
   cp ${SCRIPT_DIR}/setup_files/vimrc \
     /home/sensorpi/.vimrc
-  chown sensorpi:pi /home/sensorpi/.vimrc
+  chown sensorpi:sensorpi /home/sensorpi/.vimrc
 fi
 
 # Disable control characters in inputrc:
@@ -105,7 +98,7 @@ if [ ! -e "/home/sensorpi/.bashrc.install" ] ; then
   cp /home/sensorpi/.bashrc /home/sensorpi/.bashrc.install
   \cp ${SCRIPT_DIR}/setup_files/bashrc.sensorpi \
     /home/sensorpi/.bashrc
-  chown sensorpi:pi /home/sensorpi/.bashrc*
+  chown sensorpi:sensorpi /home/sensorpi/.bashrc*
 fi
 
 # Set up wifi region:
@@ -154,7 +147,7 @@ fi
 systemctl daemon-reload
 systemctl enable bib-status-led
 
-# Enable a fallback static address for eth0:
+# Enable a fallback static address for eth0 and disable dhcpcd control of usb0:
 if [ ! -e "/etc/dhcpcd.conf.install" ] ; then
   cp /etc/dhcpcd.conf /etc/dhcpcd.conf.install
   cat >> /etc/dhcpcd.conf <<EOF
@@ -164,7 +157,15 @@ static ip_address=10.3.141.2/24
 
 interface eth0
 fallback static_eth0
+
+denyinterfaces usb0
 EOF
+fi
+
+# Set up interface configuration for usb0:
+if [ ! -e "/etc/network/interfaces.d/usb0" ] ; then
+  \cp ${SCRIPT_DIR}/setup_files/usb0 \
+    /etc/network/interfaces.d/usb0
 fi
 
 # Install and enable up dnsmaq:
@@ -173,6 +174,10 @@ systemctl enable dnsmasq
 if [ ! -e "/etc/dnsmasq.d/010_bibsensor.conf" ] ; then
   cp ${SCRIPT_DIR}/setup_files/010_bibsensor.conf \
     /etc/dnsmasq.d/010_bibsensor.conf
+fi
+if [ ! -e "/etc/dnsmasq.d/050_bibsensor.conf" ] ; then
+  cp ${SCRIPT_DIR}/setup_files/050_bibsensor.conf \
+    /etc/dnsmasq.d/050_bibsensor.conf
 fi
 
 # Install and disable hostapd:
@@ -183,7 +188,7 @@ systemctl disable hostapd
 chkconfig hostapd off
 
 # Install flask:
-apt-get -y install python-flask python3-flask
+apt-get -y install python3-flask
 
 # Set up AP services:
 if [ ! -e "/etc/bibsensor/bibsensor.conf" ] ; then
@@ -215,17 +220,18 @@ if [ ! -e "${VENV_DIR}" ] ; then
   python3 -m venv ${VENV_DIR}
   . ${VENV_DIR}/bin/activate
   pip install -U pip
-  pip install spidev pyserial sensirion-sps030 gpsd-py3 RPi.GPIO Adafruit-DHT
-  pip3 install git+https://github.com/cemac/py-opc-R1
+  pip install spidev pyserial py-opc-ng sensirion-sps030 gpsd-py3 RPi.GPIO Adafruit-DHT
   deactivate
 fi
 
 # Create data directory for bib-sensor service:
 mkdir -p /data/bib-sensor
-chown sensorpi /data/bib-sensor
+chown sensorpi:sensorpi /data/bib-sensor
 # Create link in sensorpi home directory:
-ln -s /data/bib-sensor \
-  /home/sensorpi/data
+if [ ! -e /home/sensorpi/data ] ; then
+  ln -s /data/bib-sensor \
+    /home/sensorpi/data
+fi
 
 # Set up sensor logging services:
 if [ ! -e "/etc/bibsensor/bibsensor.conf" ] ; then
@@ -244,16 +250,18 @@ if [ ! -e "${VENV_DIR}" ] ; then
   python3 -m venv ${VENV_DIR}
   . ${VENV_DIR}/bin/activate
   pip install -U pip
-  pip install Office365-REST-Python-Client
+  pip install 'cryptography<40' Office365-REST-Python-Client
   deactivate
 fi
 
 # Create data directory for bib-data-archive service:
 mkdir -p /data/archive/bib-sensor
-chown sensorpi /data/archive/bib-sensor
+chown sensorpi:sensorpi /data/archive/bib-sensor
 # Create link in sensorpi home directory:
-ln -s /data/archive/bib-sensor \
-  /home/sensorpi/archive
+if [ ! -e /home/sensorpi/archive ] ; then
+  ln -s /data/archive/bib-sensor \
+    /home/sensorpi/archive
+fi
 
 # Set up sensor logging services:
 if [ ! -e "/etc/bibsensor/bibsensor.conf" ] ; then
@@ -266,10 +274,9 @@ fi
 systemctl daemon-reload
 systemctl enable bib-data-archive
 # Add cron job to periodically restart service:
-if [ ! -e "/etc/cron.d/bib-data-archive" ] ; then
-  ln -s /opt/bibsensor/etc/cron.d/bib-data-archive \
-    /etc/cron.d/
-fi
+\cp /opt/bibsensor/etc/cron.d/bib-data-archive \
+  /etc/cron.d/
+chown root:root /etc/cron.d/bib-data-archive
 
 # Set up update services:
 if [ ! -e "/etc/bibsensor/bibsensor.conf" ] ; then
@@ -321,6 +328,15 @@ if [ ! -e "/boot/cmdline.txt.install" ] ; then
   cp /boot/cmdline.txt /boot/cmdline.txt.install
   sed -i 's|console=serial[^\ ]\+\ ||g' \
     /boot/cmdline.txt
+  sed -i 's|$| fsck.mode=force|g' \
+    /boot/cmdline.txt
+fi
+
+# Update modules file:
+if [ ! -e "/etc/modules.install" ] ; then
+  cp /etc/modules /etc/modules.install
+  \cp ${SCRIPT_DIR}/setup_files/modules \
+    /etc/modules
 fi
 
 # Create SSH key for sensorpi user:
@@ -330,7 +346,7 @@ if [ ! -e "/home/sensorpi/.ssh/authorized_keys" ] ; then
   cat /home/sensorpi/.ssh/id_rsa.pub > /home/sensorpi/.ssh/authorized_keys
   chmod 700 /home/sensorpi/.ssh
   chmod 600 /home/sensorpi/.ssh/*
-  chown -R sensorpi:pi /home/sensorpi/.ssh
+  chown -R sensorpi:sensorpi /home/sensorpi/.ssh
 fi
 
 # Create SSH key for root user:
@@ -359,7 +375,7 @@ apt-get -y update
 apt-get -y upgrade
 apt-get -y dist-upgrade
 apt-get -y autoremove
-apt purge $(dpkg -l | awk '/^rc/ { print $2 }')
+apt purge -y $(dpkg -l | awk '/^rc/ { print $2 }')
 apt-get -y clean
 
 # Recommend a reboot:
