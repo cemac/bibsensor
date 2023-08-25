@@ -1,5 +1,5 @@
 [Unit]
-Description=BiB WiFi configuration web service
+Description=BiB Sensor WiFi configuration web service
 After=multi-user.target
 
 [Service]

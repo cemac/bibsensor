@@ -37,7 +37,7 @@ def check_args(sys_args):
     """
     # Check number of arguments, if none, return:
     if len(sys_args) < 2:
-        return
+        return None
     # Config file path is first argument. Try to open it and if succeeds,
     # return the patht to the config file, else return None:
     try:
@@ -138,19 +138,38 @@ def update_config(new_hostname, ssid, passphrase,
 # Route for root page:
 @APP.route('/', methods=['POST', 'GET'])
 def home():
+    """
+    Render web page content
+    """
     # If GET, display configuraiton form:
     if request.method == 'GET':
-        return render_template('bib-ap-web.html', hostname=socket.gethostname())
+        return render_template(
+            'bib-ap-configure.html', hostname=socket.gethostname()
+        )
     # If POST, configure wifi and reboot:
     if request.method == 'POST':
+        # Get config:
+        config = APP.config['config']
+        # Get form values:
         hostname = request.form['hostname']
         ssid = request.form['ssid']
         passphrase = request.form['passphrase']
+        # Update system config and status:
         update_config(hostname, ssid, passphrase)
         set_status(config, 1)
-        cmd_status = subprocess.call(['reboot'])
+        # Schedule a reboot:
+        cmd_status = subprocess.call(['(sleep 5 ; reboot) &'], shell=True)
+        # Display rebooting web page:
+        return render_template(
+            'bibsensor-ap-reboot.html', hostname=socket.gethostname()
+        )
+    # Else, return nothing?:
+    return None
 
-if __name__ == '__main__':
+def main():
+    """
+    Main program function
+    """
     # Check arguments:
     config_file = check_args(sys.argv)
     # Display a message:
@@ -165,3 +184,6 @@ if __name__ == '__main__':
     APP.config['config'] = config
     # Run Flask application:
     APP.run(host=config['ap_ip'], port=80, debug=False)
+
+if __name__ == '__main__':
+    main()

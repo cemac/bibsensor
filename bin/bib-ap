@@ -32,16 +32,18 @@ CONFIG_SECTION = 'bib-ap'
 # Default configuration values:
 AP_IF = 'wlan0'
 AP_IP = '10.3.141.1'
+AP_DHCP = '10.3.141.210,10.3.141.219'
 AP_PASS = 'bibsensor'
 AP_CHANNEL = 7
+AP_STARTUP_TIME = 300
 AP_DELAY = 60
 AP_TIMEOUT = 600
 AP_STATUS_FILE = '/root/.bib-ap'
 CHECK_HOST = '8.8.8.8'
 CHECK_PORT = 53
 # Configuration values which are not expected to change:
-DNSM_CONF_TARGET = '/opt/bibsensor/etc/dnsmasq.d/090_bibsensor.conf'
-DNSM_CONF_LINK = '/etc/dnsmasq.d/090_bibsensor.conf'
+DNSM_CONF_IN = '/opt/bibsensor/etc/dnsmasq.d/090_bibsensor.conf'
+DNSM_CONF_OUT = '/etc/dnsmasq.d/090_bibsensor.conf'
 APD_CONF_IN = '/opt/bibsensor/etc/hostapd/hostapd.conf'
 APD_CONF_OUT = '/etc/hostapd/hostapd.conf'
 
@@ -51,7 +53,7 @@ def check_args(sys_args):
     """
     # Check number of arguments, if none, return:
     if len(sys_args) < 2:
-        return
+        return None
     # Config file path is first argument. Try to open it and if succeeds,
     # return the patht to the config file, else return None:
     try:
@@ -70,8 +72,10 @@ def get_config(config_file, config_section):
     config = {
         'ap_if': AP_IF,
         'ap_ip': AP_IP,
+        'ap_dhcp': AP_DHCP,
         'ap_pass': AP_PASS,
         'ap_channel': AP_CHANNEL,
+        'ap_startup_time': AP_STARTUP_TIME,
         'ap_delay': AP_DELAY,
         'ap_timeout': AP_TIMEOUT,
         'ap_status_file': AP_STATUS_FILE,
@@ -100,6 +104,11 @@ def get_config(config_file, config_section):
         config['ap_ip'] = config_parser.get(config_section, 'AP_IP')
     except:
         pass
+    # DHCP range for access point:
+    try:
+        config['ap_dhcp'] = config_parser.get(config_section, 'AP_DHCP')
+    except:
+        pass
     # Passphrase for wireless network:
     try:
         config['ap_pass'] = config_parser.get(config_section, 'AP_PASS')
@@ -109,6 +118,13 @@ def get_config(config_file, config_section):
     try:
         config['ap_channel'] = config_parser.getint(
             config_section, 'AP_CHANNEL'
+        )
+    except:
+        pass
+    # Always run for this many seconds at start up:
+    try:
+        config['ap_startup_time'] = config_parser.getfloat(
+            config_section, 'AP_STARTUP_TIME'
         )
     except:
         pass
@@ -210,7 +226,7 @@ def tidy_up(config):
     cmd_status = subprocess.call(['systemctl', 'stop', 'bib-ap-web'])
     # Remove dnsmasq config file:
     try:
-        os.remove(DNSM_CONF_LINK)
+        os.remove(DNSM_CONF_OUT)
     except:
         pass
     # Restart dnsmasq service:
@@ -244,10 +260,14 @@ def start_ap(config, status):
     # Get wifi device and address to be used:
     ap_if = config['ap_if']
     ap_ip = config['ap_ip']
+    # DHCP range to use:
+    ap_dhcp = config['ap_dhcp']
     # Passphrase for AP:
     ap_pass = config['ap_pass']
     # Channel for AP:
     ap_channel = '{0}'.format(config['ap_channel'])
+    # Startup time:
+    ap_startup_time = config['ap_startup_time']
     # Timeout value, if required:
     ap_timeout = config['ap_timeout']
     # Add netmask to IP address:
@@ -263,13 +283,26 @@ def start_ap(config, status):
     with open('/etc/hosts', 'a') as hosts_fh:
         hosts_entry = '{0} bibsensor\n'.format(ap_ip)
         hosts_fh.write(hosts_entry)
-    # Create symlink to dnsmasq config for AP:
-    if os.path.exists(DNSM_CONF_LINK):
-        os.remove(DNSM_CONF_LINK)
-    os.symlink(DNSM_CONF_TARGET, DNSM_CONF_LINK)
+    # Set up dnsmasq config for AP. Remove existing:
+    if os.path.exists(DNSM_CONF_OUT):
+        os.remove(DNSM_CONF_OUT)
+    # Read in template:
+    with open(DNSM_CONF_IN, 'r') as dnsm_fh:
+        dnsm_conf = dnsm_fh.readlines()
+    dnsm_conf = ''.join(dnsm_conf)
+    # Replace values with those from config:
+    dnsm_conf = dnsm_conf.replace('XWLANX', ap_if)
+    dnsm_conf = dnsm_conf.replace('XIPX', ap_ip)
+    dnsm_conf = dnsm_conf.replace('XDHCPX', ap_dhcp)
+    # Create the hostapd config file:
+    with open(DNSM_CONF_OUT, 'w') as dnsm_fh:
+        dnsm_fh.write(dnsm_conf)
     # Restart dnsmasq service:
     cmd_status = subprocess.call(['systemctl', 'restart', 'dnsmasq'])
-    # Set up hostapd config. read in template:
+    # Set up hostapd config. Remove existing:
+    if os.path.exists(APD_CONF_OUT,):
+        os.remove(APD_CONF_OUT,)
+    # Read in template:
     with open(APD_CONF_IN, 'r') as apd_fh:
         apd_conf = apd_fh.readlines()
     apd_conf = ''.join(apd_conf)
@@ -285,6 +318,11 @@ def start_ap(config, status):
     cmd_status = subprocess.call(['systemctl', 'start', 'hostapd'])
     # Start web service to enable wifi configuration:
     cmd_status = subprocess.call(['systemctl', 'start', 'bib-ap-web'])
+    # If status is -1 (startup), stop the service after specified time:
+    if status == -1:
+        time.sleep(ap_startup_time)
+        tidy_up(config)
+        return
     # If status is 2, stop the service after specified time, and reboot:
     if status == 2:
         time.sleep(config['ap_timeout'])
@@ -307,6 +345,8 @@ def main():
     config = get_config(config_file, CONFIG_SECTION)
     # Tidy up first:
     tidy_up(config)
+    # Always run at start up for specified amount of time (status -1):
+    start_ap(config, -1)
     # Check AP configuration status, where Status should be one of:
     #   0 : Not configured
     #   1 : Just configured, needs checking
