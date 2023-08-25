@@ -15,7 +15,6 @@ from functools import partial
 import logging
 import os
 import signal
-import socket
 import subprocess
 import sys
 from threading import Event, Lock, Thread
@@ -25,7 +24,7 @@ import time
 import Adafruit_DHT
 import RPi.GPIO as GPIO
 import gpsd
-import opc
+import opcng
 import sensirion_sps030
 import spidev
 
@@ -35,7 +34,7 @@ CONFIG_SECTION = 'bib-sensor'
 POLL_INTERVAL = 10
 LOG_INTERVAL = 60
 DATA_DIR = '/data/bib-sensor'
-R1_DECIMALS = 3
+OPC_DECIMALS = 3
 NODATA_VALUE = -999
 SENSOR_TIMEOUT = 1500
 DHT_GPIO_POWER = 17
@@ -49,7 +48,7 @@ def check_args(sys_args):
     """
     # Check number of arguments, if none, return:
     if len(sys_args) < 2:
-        return
+        return None
     # Config file path is first argument. Try to open it and if succeeds,
     # return the patht to the config file, else return None:
     try:
@@ -69,7 +68,7 @@ def get_config(config_file, config_section):
         'poll_interval': POLL_INTERVAL,
         'log_interval': LOG_INTERVAL,
         'data_dir': DATA_DIR,
-        'r1_decimals': R1_DECIMALS,
+        'opc_decimals': OPC_DECIMALS,
         'nodata_value': NODATA_VALUE,
         'sensor_timeout': SENSOR_TIMEOUT,
         'dht_gpio_power': DHT_GPIO_POWER,
@@ -107,10 +106,10 @@ def get_config(config_file, config_section):
         config['data_dir'] = config_parser.get(config_section, 'DATA_DIR')
     except:
         pass
-    # Number of decimal places to which R1 data will be rounded:
+    # Number of decimal places to which OPC data will be rounded:
     try:
-        config['r1_decimals'] = config_parser.getint(
-            config_section, 'R1_DECIMALS'
+        config['opc_decimals'] = config_parser.getint(
+            config_section, 'OPC_DECIMALS'
         )
     except:
         pass
@@ -151,40 +150,46 @@ def get_config(config_file, config_section):
         pass
     # File which contains date of most recent update:
     try:
-        config['update_timestamp'] = config_parser.get(config_section, 'UPDATE_TIMESTAMP')
+        config['update_timestamp'] = config_parser.get(
+            config_section, 'UPDATE_TIMESTAMP'
+        )
     except:
         pass
     # Return the config:
     return config
 
-def init_r1():
+def init_opc():
     """
-    Try to init Alphasense R1 sensor and return details
+    Try to init Alphasense OPC sensor and return details
     """
     # Init SPI bits:
     spi = spidev.SpiDev()
     spi.open(0, 0)
     spi.mode = 1
     spi.max_speed_hz = 500000
+    spi.lsbfirst = False
     # Try to init sensor:
     try:
         # Switch the sensor on, and take first readings, which are usually
         # useless:
-        r1 = opc.OPCR1(spi)
-        r1.on()
+        opc = opcng.detect(spi)
+        opc.on()
         time.sleep(2)
-        # First reading might be garbage:
+        # First readings might be garbage:
         try:
-            r1.histogram()
+            opc.histogram()
+            time.sleep(2)
+            opc.histogram()
+            time.sleep(2)
+            opc.histogram()
+            time.sleep(2)
         except:
             pass
-        time.sleep(2)
-        r1.histogram()
     except Exception as ex_msg:
-        sys.stdout.write('R1 init error: {0}\n'.format(ex_msg))
-        r1 = None
+        sys.stdout.write('OPC init error: {0}\n'.format(ex_msg))
+        opc = None
     # Return the sensor object:
-    return r1
+    return opc
 
 def init_sps():
     """
@@ -213,11 +218,11 @@ def get_sensors():
     """
     # Init dict for sensor information:
     sensors = {
-        'R1': None,
+        'OPC': None,
         'SPS': None,
     }
-    # Check for Alphasense R1 sensor:
-    sensors['R1'] = init_r1()
+    # Check for Alphasense OPC sensor:
+    sensors['OPC'] = init_opc()
     # Check for Sensirion SPS sensor:
     sensors['SPS'] = init_sps()
     # Return the sensor details:
@@ -256,6 +261,9 @@ def get_dht(config):
         GPIO.setup(dht_gpio_power, GPIO.IN)
         # Set dht to None:
         dht = None
+        # Display message:
+        err_msg = 'No DHT sensor found\n'
+        sys.stdout.write(err_msg)
     # Else, display message:
     else:
         err_msg = 'DHT sensor found\n'
@@ -286,13 +294,21 @@ def get_system_info(config, sensors):
     """
     # Init dict:
     sysinfo = {
+      'hostname': None,
       'pi_model': None,
       'pi_serial': None,
       'ip_addresses': None,
-      'r1_serial': None,
+      'opc_serial': None,
       'sps_serial': None,
       'last_update': None
     }
+    # Get system hostname:
+    hostnameinfo = subprocess.Popen(
+        ['/usr/bin/hostname'], stdout=subprocess.PIPE
+    )
+    sysinfo['hostname'] = (
+        hostnameinfo.stdout.read().decode('utf-8').rstrip('\n').strip()
+    )
     # Get pi model and serial:
     cpuinfo = subprocess.Popen(
         ['/usr/bin/cat', '/proc/cpuinfo'], stdout=subprocess.PIPE
@@ -303,13 +319,6 @@ def get_system_info(config, sensors):
             sysinfo['pi_model'] = values[1].strip()
         if values[0].strip().replace('\t', '') == 'Serial':
             sysinfo['pi_serial'] = values[1].strip()
-    # Get system hostname:
-    hostnameinfo = subprocess.Popen(
-        ['/usr/bin/hostname'], stdout=subprocess.PIPE
-    )
-    sysinfo['hostname'] = (
-        hostnameinfo.stdout.read().decode('utf-8').rstrip('\n').strip()
-    )
     # Get system ip addresses:
     ipinfo = subprocess.Popen(
         ['/usr/bin/hostname', '-I'], stdout=subprocess.PIPE
@@ -317,9 +326,9 @@ def get_system_info(config, sensors):
     sysinfo['ip_addresses'] = (
         ipinfo.stdout.read().decode('utf-8').rstrip('\n').strip()
     )
-    # Get r1 serial:
-    if sensors['R1'] is not None:
-        sysinfo['r1_serial'] = sensors['R1'].sn().strip()
+    # Get opc serial:
+    if sensors['OPC'] is not None:
+        sysinfo['opc_serial'] = sensors['OPC'].serial().strip()
     # Get sps serial:
     if sensors['SPS'] is not None:
         sysinfo['sps_serial'] = sensors['SPS'].get_serial_no()
@@ -337,13 +346,13 @@ def poll_sensors(config, dht, gps, sensors, sensor_data):
     """
     # Get required config values:
     poll_interval = config['poll_interval']
-    r1_decimals = config['r1_decimals']
+    opc_decimals = config['opc_decimals']
     nodata_value = config['nodata_value']
     sensor_timeout = config['sensor_timeout']
     dht_gpio_out = config['dht_gpio_out']
     dht_decimals = config['dht_decimals']
     # Variables for storing time of last good value:
-    last_r1_time = time.time()
+    last_opc_time = time.time()
     last_sps_time = time.time()
     # Do this until stopped:
     while True:
@@ -364,35 +373,45 @@ def poll_sensors(config, dht, gps, sensors, sensor_data):
             'lat': nodata_value,
             'lon': nodata_value,
             'alt': nodata_value,
-            'r1_temp': nodata_value,
-            'r1_rh': nodata_value,
-            'r1_pm1': nodata_value,
-            'r1_pm2.5': nodata_value,
-            'r1_pm10': nodata_value,
-            'r1_period': nodata_value,
-            'r1_bin0': nodata_value,
-            'r1_bin1': nodata_value,
-            'r1_bin2': nodata_value,
-            'r1_bin3': nodata_value,
-            'r1_bin4': nodata_value,
-            'r1_bin5': nodata_value,
-            'r1_bin6': nodata_value,
-            'r1_bin7': nodata_value,
-            'r1_bin8': nodata_value,
-            'r1_bin9': nodata_value,
-            'r1_bin10': nodata_value,
-            'r1_bin11': nodata_value,
-            'r1_bin12': nodata_value,
-            'r1_bin13': nodata_value,
-            'r1_bin14': nodata_value,
-            'r1_bin15': nodata_value,
-            'r1_bin1_mtof': nodata_value,
-            'r1_bin3_mtof': nodata_value,
-            'r1_bin5_mtof': nodata_value,
-            'r1_bin7_mtof': nodata_value,
-            'r1_sfr': nodata_value,
-            'r1_reject_glitch': nodata_value,
-            'r1_reject_long': nodata_value,
+            'opc_temp': nodata_value,
+            'opc_rh': nodata_value,
+            'opc_pm1': nodata_value,
+            'opc_pm2.5': nodata_value,
+            'opc_pm10': nodata_value,
+            'opc_period': nodata_value,
+            'opc_bin0': nodata_value,
+            'opc_bin1': nodata_value,
+            'opc_bin2': nodata_value,
+            'opc_bin3': nodata_value,
+            'opc_bin4': nodata_value,
+            'opc_bin5': nodata_value,
+            'opc_bin6': nodata_value,
+            'opc_bin7': nodata_value,
+            'opc_bin8': nodata_value,
+            'opc_bin9': nodata_value,
+            'opc_bin10': nodata_value,
+            'opc_bin11': nodata_value,
+            'opc_bin12': nodata_value,
+            'opc_bin13': nodata_value,
+            'opc_bin14': nodata_value,
+            'opc_bin15': nodata_value,
+            'opc_bin16': nodata_value,
+            'opc_bin17': nodata_value,
+            'opc_bin18': nodata_value,
+            'opc_bin19': nodata_value,
+            'opc_bin20': nodata_value,
+            'opc_bin21': nodata_value,
+            'opc_bin22': nodata_value,
+            'opc_bin23': nodata_value,
+            'opc_bin1_mtof': nodata_value,
+            'opc_bin3_mtof': nodata_value,
+            'opc_bin5_mtof': nodata_value,
+            'opc_bin7_mtof': nodata_value,
+            'opc_sfr': nodata_value,
+            'opc_reject_glitch': nodata_value,
+            'opc_reject_long': nodata_value,
+            'opc_reject_ratio': nodata_value,
+            'opc_reject_oor': nodata_value,
             'sps_n05': nodata_value,
             'sps_n1': nodata_value,
             'sps_n2.5': nodata_value,
@@ -418,7 +437,6 @@ def poll_sensors(config, dht, gps, sensors, sensor_data):
                     ts_data['rh'] = round(rh, dht_decimals)
             except Exception as ex_msg:
                 sys.stdout.write('DHT error: {0}\n'.format(ex_msg))
-                pass
         # Check for GPS:
         if gps is not None:
             # Try to get GPS data:
@@ -442,48 +460,101 @@ def poll_sensors(config, dht, gps, sensors, sensor_data):
                 pass
         # Acquire lock:
         sensor_data['lock'].acquire()
-        # Check for R1 sensor:
-        if sensors['R1'] is not None:
-            # Try to get R1 sensor data:
+        # Check for OPC sensor:
+        if sensors['OPC'] is not None:
+            # Try to get OPC sensor data:
             try:
-                r1_data = sensors['R1'].histogram()
-                ts_data['r1_temp'] = round(r1_data['Temperature'], r1_decimals)
-                ts_data['r1_rh'] = round(r1_data['Humidity'], r1_decimals)
-                ts_data['r1_pm1'] = round(r1_data['PM1'], r1_decimals)
-                ts_data['r1_pm2.5'] = round(r1_data['PM2.5'], r1_decimals)
-                ts_data['r1_pm10'] = round(r1_data['PM10'], r1_decimals)
-                ts_data['r1_period'] = round(r1_data['Sampling Period'],
-                                             r1_decimals)
-                ts_data['r1_bin0'] = round(r1_data['Bin 0'], r1_decimals)
-                ts_data['r1_bin1'] = round(r1_data['Bin 1'], r1_decimals)
-                ts_data['r1_bin2'] = round(r1_data['Bin 2'], r1_decimals)
-                ts_data['r1_bin3'] = round(r1_data['Bin 3'], r1_decimals)
-                ts_data['r1_bin4'] = round(r1_data['Bin 4'], r1_decimals)
-                ts_data['r1_bin5'] = round(r1_data['Bin 5'], r1_decimals)
-                ts_data['r1_bin6'] = round(r1_data['Bin 6'], r1_decimals)
-                ts_data['r1_bin7'] = round(r1_data['Bin 7'], r1_decimals)
-                ts_data['r1_bin8'] = round(r1_data['Bin 8'], r1_decimals)
-                ts_data['r1_bin9'] = round(r1_data['Bin 9'], r1_decimals)
-                ts_data['r1_bin10'] = round(r1_data['Bin 10'], r1_decimals)
-                ts_data['r1_bin11'] = round(r1_data['Bin 11'], r1_decimals)
-                ts_data['r1_bin12'] = round(r1_data['Bin 12'], r1_decimals)
-                ts_data['r1_bin13'] = round(r1_data['Bin 13'], r1_decimals)
-                ts_data['r1_bin14'] = round(r1_data['Bin 14'], r1_decimals)
-                ts_data['r1_bin15'] = round(r1_data['Bin 15'], r1_decimals)
-                ts_data['r1_bin1_mtof'] = round(r1_data['Bin1 MToF'], r1_decimals)
-                ts_data['r1_bin3_mtof'] = round(r1_data['Bin3 MToF'], r1_decimals)
-                ts_data['r1_bin5_mtof'] = round(r1_data['Bin5 MToF'], r1_decimals)
-                ts_data['r1_bin7_mtof'] = round(r1_data['Bin7 MToF'], r1_decimals)
-                ts_data['r1_sfr'] = round(r1_data['SFR'], r1_decimals)
-                ts_data['r1_reject_glitch'] = r1_data['Reject count glitch']
-                ts_data['r1_reject_long'] = r1_data['Reject count long']
-                last_r1_time = time.time()
+                opc_data = sensors['OPC'].histogram()
+                try:
+                    ts_data['opc_temp'] = round(
+                        opc_data['Temperature'], opc_decimals
+                    )
+                except:
+                    pass
+                try:
+                    ts_data['opc_rh'] = round(
+                        opc_data['Relative humidity'], opc_decimals
+                    )
+                except:
+                    pass
+                try:
+                    ts_data['opc_pm1'] = round(opc_data['PM1'], opc_decimals)
+                except:
+                    pass
+                try:
+                    ts_data['opc_pm2.5'] = round(
+                        opc_data['PM2.5'], opc_decimals
+                    )
+                except:
+                    pass
+                try:
+                    ts_data['opc_pm10'] = round(opc_data['PM10'], opc_decimals)
+                except:
+                    pass
+                try:
+                    ts_data['opc_period'] = round(
+                        opc_data['Sampling Period'], opc_decimals
+                    )
+                except:
+                    pass
+                for i in range(24):
+                    try:
+                        ts_data['opc_bin{0}'.format(i)] = round(
+                            opc_data['Bin {0}'.format(i)], opc_decimals
+                        )
+                    except:
+                        pass
+                try:
+                    ts_data['opc_bin1_mtof'] = round(
+                        opc_data['Bin1 MToF'], opc_decimals
+                    )
+                except:
+                    pass
+                try:
+                    ts_data['opc_bin3_mtof'] = round(
+                        opc_data['Bin3 MToF'], opc_decimals
+                    )
+                except:
+                    pass
+                try:
+                    ts_data['opc_bin5_mtof'] = round(
+                        opc_data['Bin5 MToF'], opc_decimals
+                    )
+                except:
+                    pass
+                try:
+                    ts_data['opc_bin7_mtof'] = round(
+                        opc_data['Bin7 MToF'], opc_decimals
+                    )
+                except:
+                    pass
+                try:
+                    ts_data['opc_sfr'] = round(opc_data['SFR'], opc_decimals)
+                except:
+                    pass
+                try:
+                    ts_data['opc_reject_glitch'] = opc_data['#RejectGlitch']
+                except:
+                    pass
+                try:
+                    ts_data['opc_reject_long'] = opc_data['#RejectLongTOF']
+                except:
+                    pass
+                try:
+                    ts_data['opc_reject_ratio'] = opc_data['#RejectRatio']
+                except:
+                    pass
+                try:
+                    ts_data['opc_reject_oor'] = opc_data['#RejectOutOfRange']
+                except:
+                    pass
+                last_opc_time = time.time()
             except Exception as ex_msg:
-                sys.stdout.write('R1 error: {0}\n'.format(ex_msg))
-                pass
-            # If sensor hasn't successfully updated in configured timeout, exit:
-            if (time.time() - last_r1_time) > sensor_timeout:
-                err_msg = 'No R1 data logged in {0} seconds. Exiting\n'
+                sys.stdout.write('OPC error: {0}\n'.format(ex_msg))
+            # If sensor hasn't successfully updated in configured timeout,
+            # exit:
+            if (time.time() - last_opc_time) > sensor_timeout:
+                err_msg = 'No OPC data logged in {0} seconds. Exiting\n'
                 err_msg = err_msg.format(sensor_timeout)
                 sys.stdout.write(err_msg)
                 sensor_data['exit_status'] = 1
@@ -506,8 +577,8 @@ def poll_sensors(config, dht, gps, sensors, sensor_data):
                 last_sps_time = time.time()
             except Exception as ex_msg:
                 sys.stdout.write('SPS error: {0}\n'.format(ex_msg))
-                pass
-            # If sensor hasn't successfully updated in configured timeout, exit:
+            # If sensor hasn't successfully updated in configured timeout,
+            # exit:
             if (time.time() - last_sps_time) > sensor_timeout:
                 err_msg = 'No SPS data logged in {0} seconds. Exiting\n'
                 err_msg = err_msg.format(sensor_timeout)
@@ -535,12 +606,15 @@ def log_data(config, sensors, sensor_data):
     data_dir = config['data_dir']
     # Fields expected in sensor data:
     data_fields = [
-        'date', 'temp', 'rh', 'lat', 'lon', 'alt', 'r1_temp', 'r1_rh',
-        'r1_pm1', 'r1_pm2.5', 'r1_pm10', 'r1_period', 'r1_bin0', 'r1_bin1',
-        'r1_bin2', 'r1_bin3', 'r1_bin4', 'r1_bin5', 'r1_bin6', 'r1_bin7',
-        'r1_bin8', 'r1_bin9', 'r1_bin10', 'r1_bin11', 'r1_bin12', 'r1_bin13',
-        'r1_bin14', 'r1_bin15', 'r1_bin1_mtof', 'r1_bin3_mtof', 'r1_bin5_mtof',
-        'r1_bin7_mtof', 'r1_sfr', 'r1_reject_glitch', 'r1_reject_long',
+        'date', 'temp', 'rh', 'lat', 'lon', 'alt', 'opc_temp', 'opc_rh',
+        'opc_pm1', 'opc_pm2.5', 'opc_pm10', 'opc_period', 'opc_bin0',
+        'opc_bin1', 'opc_bin2', 'opc_bin3', 'opc_bin4', 'opc_bin5', 'opc_bin6',
+        'opc_bin7', 'opc_bin8', 'opc_bin9', 'opc_bin10', 'opc_bin11',
+        'opc_bin12', 'opc_bin13', 'opc_bin14', 'opc_bin15', 'opc_bin16',
+        'opc_bin17', 'opc_bin18', 'opc_bin19', 'opc_bin20', 'opc_bin21',
+        'opc_bin22', 'opc_bin23',  'opc_bin1_mtof', 'opc_bin3_mtof',
+        'opc_bin5_mtof', 'opc_bin7_mtof', 'opc_sfr', 'opc_reject_glitch',
+        'opc_reject_long', 'opc_reject_ratio', 'opc_reject_oor',
         'sps_n05', 'sps_n1', 'sps_n2.5', 'sps_n4', 'sps_n10', 'sps_pm1',
         'sps_pm2.5', 'sps_pm4', 'sps_pm10', 'sps_tps'
     ]
@@ -612,9 +686,9 @@ def exit(config, sensors, sensor_data):
     """
     # Tell the threads to stop:
     sensor_data['exit'].set()
-    # If r1 sensor is connected, switch it off:
-    if sensors['R1'] is not None:
-        sensors['R1'].off()
+    # If opc sensor is connected, switch it off:
+    if sensors['OPC'] is not None:
+        sensors['OPC'].off()
     # If sps sensor is connected, switch it off:
     if sensors['SPS'] is not None:
         sensors['SPS'].reset()
@@ -679,7 +753,9 @@ def main():
         sensor_data['exit_status'] = 1
         exit(config, sensors, sensor_data)
     # Add kill signal handler:
-    signal.signal(signal.SIGTERM, partial(__exit, config, sensors, sensor_data))
+    signal.signal(
+        signal.SIGTERM, partial(__exit, config, sensors, sensor_data)
+    )
     # Create a data accessing lock for use by threads:
     sensor_data['lock'] = Lock()
     # List for storing threads:

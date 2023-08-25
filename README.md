@@ -10,7 +10,7 @@ The sensor software is designed for use with a Raspberry Pi Zero (though has als
 
 The status LED on the PCB is used to indicate the status of the device's internet connection. The PCB also houses a _reset_ switch which can be pressed to cleanly shut down the device.
 
-Using the connections on the PCB, the sensor can have a real time clock connected, an Alphasense R1 or R2 sensor, a Sensirion SPS030 sensor, a temperature + humidity sensor.
+Using the connections on the PCB, the sensor can have a real time clock connected, an Alphasense R1, R2, N2 or N3 sensor, a Sensirion SPS030 sensor, a temperature + humidity sensor.
 
 If a GPS device is connected (e.g. via USB), the location information will be logged, and the GPS device will also be used as a time source.
 
@@ -162,7 +162,7 @@ The service runs via the Python file `/opt/bibsensor/bin/bib-sensor`, using the 
 
 Various configuration options for the service can be found in the `[bib-sensor]` section of the `/etc/bibsensor/bibsensor.conf` file.
 
-When the service starts, it will first check for connected GPS, temperature + humidity, Alphasense R1 or R2 and Sensirion SPS030 sensors. If neither an Alphasense or Sensirion sensor is connected, then the process will exit.
+When the service starts, it will first check for connected GPS, temperature + humidity, Alphasense R1, R2, N2 or N3 and Sensirion SPS030 sensors. If neither an Alphasense or Sensirion sensor is connected, then the process will exit.
 
 The systemd unit file for the service is located at `/opt/bibsensor/etc/systemd/system/bib-sensor.service`, with a symlink to this file at `/etc/systemd/system/bib-sensor.service`. This file includes some options to restart the service automatically:
 
