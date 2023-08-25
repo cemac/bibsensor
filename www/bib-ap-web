@@ -161,7 +161,7 @@ def home():
         cmd_status = subprocess.call(['(sleep 5 ; reboot) &'], shell=True)
         # Display rebooting web page:
         return render_template(
-            'bibsensor-ap-reboot.html', hostname=socket.gethostname()
+            'bib-ap-reboot.html', hostname=socket.gethostname()
         )
     # Else, return nothing?:
     return None
